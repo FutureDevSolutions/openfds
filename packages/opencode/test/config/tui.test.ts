@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test"
+import { Effect } from "effect"
 import path from "path"
 import fs from "fs/promises"
 import { tmpdir } from "../fixture/fixture"
@@ -7,12 +8,12 @@ import { Config } from "../../src/config/config"
 import { TuiConfig } from "../../src/config/tui"
 import { Global } from "../../src/global"
 import { Filesystem } from "../../src/util/filesystem"
-import { AppRuntime } from "../../src/effect/app-runtime"
 
 const managedConfigDir = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR!
 const wintest = process.platform === "win32" ? test : test.skip
-const clear = (wait = false) => AppRuntime.runPromise(Config.Service.use((svc) => svc.invalidate(wait)))
-const load = () => AppRuntime.runPromise(Config.Service.use((svc) => svc.get()))
+const clear = (wait = false) =>
+  Effect.runPromise(Config.Service.use((svc) => svc.invalidate(wait)).pipe(Effect.provide(Config.defaultLayer)))
+const load = () => Effect.runPromise(Config.Service.use((svc) => svc.get()).pipe(Effect.provide(Config.defaultLayer)))
 
 beforeEach(async () => {
   await clear(true)
