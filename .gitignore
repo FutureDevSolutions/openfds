@@ -2,7 +2,6 @@
 node_modules
 .worktrees
 .sst
-.env
 .idea
 .vscode
 .codex
@@ -29,3 +28,4 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+config.bat
