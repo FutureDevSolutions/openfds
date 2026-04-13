@@ -4,6 +4,7 @@ import { Effect, Layer } from "effect"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { AppFileSystem } from "../../src/filesystem"
 import { Instance } from "../../src/project/instance"
+import { Shell } from "../../src/shell/shell"
 import { ShellJob } from "../../src/shell-job"
 import { provideTmpdirInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -15,7 +16,15 @@ const it = testEffect(
   ),
 )
 
-const node = (script: string) => `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`
+const quote = (text: string) => `"${text}"`
+const squote = (text: string) => `'${text}'`
+const shell = () => Shell.name(Shell.acceptable())
+const evalarg = (text: string) => (shell() === "cmd" ? quote(text) : squote(text))
+const node = (script: string) => {
+  const text = `${quote(process.execPath.replaceAll("\\", "/"))} -e ${evalarg(script)}`
+  if (shell() === "powershell" || shell() === "pwsh") return `& ${text}`
+  return text
+}
 
 const alive = (pid: number) => {
   try {
