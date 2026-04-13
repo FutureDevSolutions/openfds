@@ -3,9 +3,9 @@ import { Permission } from "../src/permission"
 import { Config } from "../src/config/config"
 import { Instance } from "../src/project/instance"
 import { tmpdir } from "./fixture/fixture"
-import { AppRuntime } from "../src/effect/app-runtime"
+import { Effect } from "effect"
 
-const load = () => AppRuntime.runPromise(Config.Service.use((svc) => svc.get()))
+const load = () => Effect.runPromise(Config.Service.use((svc) => svc.get()).pipe(Effect.provide(Config.defaultLayer)))
 
 afterEach(async () => {
   await Instance.disposeAll()
