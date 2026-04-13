@@ -74,16 +74,14 @@ export const FileRoutes = lazy(() =>
         const type = c.req.valid("query").type
         const limit = c.req.valid("query").limit
         const results = await AppRuntime.runPromise(
-          Effect.gen(function* () {
-            return yield* File.Service.use((svc) =>
-              svc.search({
-                query,
-                limit: limit ?? 10,
-                dirs: dirs !== "false",
-                type,
-              }),
-            )
-          }),
+          File.Service.use((svc) =>
+            svc.search({
+              query,
+              limit: limit ?? 10,
+              dirs: dirs !== "false",
+              type,
+            }),
+          ),
         )
         return c.json(results)
       },
@@ -140,11 +138,7 @@ export const FileRoutes = lazy(() =>
       ),
       async (c) => {
         const path = c.req.valid("query").path
-        const content = await AppRuntime.runPromise(
-          Effect.gen(function* () {
-            return yield* File.Service.use((svc) => svc.list(path))
-          }),
-        )
+        const content = await AppRuntime.runPromise(File.Service.use((svc) => svc.list(path)))
         return c.json(content)
       },
     )
@@ -173,11 +167,7 @@ export const FileRoutes = lazy(() =>
       ),
       async (c) => {
         const path = c.req.valid("query").path
-        const content = await AppRuntime.runPromise(
-          Effect.gen(function* () {
-            return yield* File.Service.use((svc) => svc.read(path))
-          }),
-        )
+        const content = await AppRuntime.runPromise(File.Service.use((svc) => svc.read(path)))
         return c.json(content)
       },
     )
@@ -199,11 +189,7 @@ export const FileRoutes = lazy(() =>
         },
       }),
       async (c) => {
-        const content = await AppRuntime.runPromise(
-          Effect.gen(function* () {
-            return yield* File.Service.use((svc) => svc.status())
-          }),
-        )
+        const content = await AppRuntime.runPromise(File.Service.use((svc) => svc.status()))
         return c.json(content)
       },
     ),
