@@ -7,6 +7,7 @@ import { LocalContext } from "../util/local-context"
 import { Project } from "./project"
 import { WorkspaceContext } from "@/control-plane/workspace-context"
 import { State } from "./state"
+import { makeRuntime } from "@/effect/run-service"
 
 export interface InstanceContext {
   directory: string
@@ -16,6 +17,7 @@ export interface InstanceContext {
 
 const context = LocalContext.create<InstanceContext>("instance")
 const cache = new Map<string, Promise<InstanceContext>>()
+const project = makeRuntime(Project.Service, Project.defaultLayer)
 
 const disposal = {
   all: undefined as Promise<void> | undefined,
@@ -30,11 +32,13 @@ function boot(input: { directory: string; init?: () => Promise<any>; worktree?: 
             worktree: input.worktree,
             project: input.project,
           }
-        : await Project.fromDirectory(input.directory).then(({ project, sandbox }) => ({
-            directory: input.directory,
-            worktree: sandbox,
-            project,
-          }))
+        : await project
+            .runPromise((svc) => svc.fromDirectory(input.directory))
+            .then(({ project, sandbox }) => ({
+              directory: input.directory,
+              worktree: sandbox,
+              project,
+            }))
     await context.provide(ctx, async () => {
       await input.init?.()
     })
