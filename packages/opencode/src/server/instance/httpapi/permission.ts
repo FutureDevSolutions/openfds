@@ -1,44 +1,44 @@
 import { AppLayer } from "@/effect/app-runtime"
 import { memoMap } from "@/effect/run-service"
-import { Question } from "@/question"
-import { QuestionID } from "@/question/schema"
+import { Permission } from "@/permission"
+import { PermissionID } from "@/permission/schema"
 import { lazy } from "@/util/lazy"
 import { Effect, Layer, Schema } from "effect"
 import { HttpRouter, HttpServer } from "effect/unstable/http"
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/unstable/httpapi"
 import type { Handler } from "hono"
 
-const root = "/experimental/httpapi/question"
+const root = "/experimental/httpapi/permission"
 
-const Api = HttpApi.make("question")
+const Api = HttpApi.make("permission")
   .add(
-    HttpApiGroup.make("question")
+    HttpApiGroup.make("permission")
       .add(
         HttpApiEndpoint.get("list", root, {
-          success: Schema.Array(Question.Request),
+          success: Schema.Array(Permission.Request),
         }).annotateMerge(
           OpenApi.annotations({
-            identifier: "question.list",
-            summary: "List pending questions",
-            description: "Get all pending question requests across all sessions.",
+            identifier: "permission.list",
+            summary: "List pending permissions",
+            description: "Get all pending permission requests across all sessions.",
           }),
         ),
         HttpApiEndpoint.post("reply", `${root}/:requestID/reply`, {
-          params: { requestID: QuestionID },
-          payload: Question.Reply,
+          params: { requestID: PermissionID },
+          payload: Permission.ReplyBody,
           success: Schema.Boolean,
         }).annotateMerge(
           OpenApi.annotations({
-            identifier: "question.reply",
-            summary: "Reply to question request",
-            description: "Provide answers to a question request from the AI assistant.",
+            identifier: "permission.reply",
+            summary: "Respond to permission request",
+            description: "Approve or deny a permission request from the AI assistant.",
           }),
         ),
       )
       .annotateMerge(
         OpenApi.annotations({
-          title: "question",
-          description: "Experimental HttpApi question routes.",
+          title: "permission",
+          description: "Experimental HttpApi permission routes.",
         }),
       ),
   )
@@ -50,24 +50,25 @@ const Api = HttpApi.make("question")
     }),
   )
 
-const list = Effect.fn("QuestionHttpApi.list")(function* () {
-  const svc = yield* Question.Service
+const list = Effect.fn("PermissionHttpApi.list")(function* () {
+  const svc = yield* Permission.Service
   return yield* svc.list()
 })
 
-const reply = Effect.fn("QuestionHttpApi.reply")(function* (ctx: {
-  params: { requestID: QuestionID }
-  payload: Question.Reply
+const reply = Effect.fn("PermissionHttpApi.reply")(function* (ctx: {
+  params: { requestID: PermissionID }
+  payload: Permission.ReplyBody
 }) {
-  const svc = yield* Question.Service
+  const svc = yield* Permission.Service
   yield* svc.reply({
     requestID: ctx.params.requestID,
-    answers: ctx.payload.answers,
+    reply: ctx.payload.reply,
+    message: ctx.payload.message,
   })
   return true
 })
 
-const QuestionLive = HttpApiBuilder.group(Api, "question", (handlers) =>
+const PermissionLive = HttpApiBuilder.group(Api, "permission", (handlers) =>
   handlers.handle("list", list).handle("reply", reply),
 )
 
@@ -76,7 +77,7 @@ const web = lazy(() =>
     Layer.mergeAll(
       AppLayer,
       HttpApiBuilder.layer(Api, { openapiPath: `${root}/doc` }).pipe(
-        Layer.provide(QuestionLive),
+        Layer.provide(PermissionLive),
         Layer.provide(HttpServer.layerServices),
       ),
     ),
@@ -87,4 +88,4 @@ const web = lazy(() =>
   ),
 )
 
-export const QuestionHttpApiHandler: Handler = (c, _next) => web().handler(c.req.raw)
+export const PermissionHttpApiHandler: Handler = (c, _next) => web().handler(c.req.raw)
