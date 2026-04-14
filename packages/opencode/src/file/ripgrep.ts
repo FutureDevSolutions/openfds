@@ -7,6 +7,7 @@ import { ripgrep } from "ripgrep"
 import { makeRuntime } from "@/effect/run-service"
 import { Filesystem } from "@/util/filesystem"
 import { Log } from "@/util/log"
+import { ProjectProfile } from "@/project/profile"
 
 export namespace Ripgrep {
   const log = Log.create({ service: "ripgrep" })
@@ -233,7 +234,10 @@ export namespace Ripgrep {
   }
 
   function filesArgs(input: FilesInput) {
-    const args = ["--files", "--glob=!.git/*"]
+    const args = [
+      "--files",
+      ...ProjectProfile.DEFAULT_IGNORE_GLOBS.flatMap((item) => [`--glob=!${item}`, `--glob=!${item}/**`]),
+    ]
     if (input.follow) args.push("--follow")
     if (input.hidden !== false) args.push("--hidden")
     if (input.maxDepth !== undefined) args.push(`--max-depth=${input.maxDepth}`)
@@ -247,7 +251,12 @@ export namespace Ripgrep {
   }
 
   function searchArgs(input: SearchInput) {
-    const args = ["--json", "--hidden", "--glob=!.git/*", "--no-messages"]
+    const args = [
+      "--json",
+      "--hidden",
+      "--no-messages",
+      ...ProjectProfile.DEFAULT_IGNORE_GLOBS.flatMap((item) => [`--glob=!${item}`, `--glob=!${item}/**`]),
+    ]
     if (input.follow) args.push("--follow")
     if (input.glob) {
       for (const glob of input.glob) {
@@ -522,7 +531,7 @@ export namespace Ripgrep {
 
         const root: Node = { name: "", children: new Map() }
         for (const file of list) {
-          if (file.includes(".opencode")) continue
+          if (file.includes(".opencode") || file.includes(".openfds")) continue
           const parts = file.split(path.sep)
           if (parts.length < 2) continue
           let node = root

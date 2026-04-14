@@ -11,20 +11,21 @@ import pkg from "electron-updater"
 import contextMenu from "electron-context-menu"
 contextMenu({ showSaveImageAs: true, showLookUpSelection: false, showSearchWithGoogle: false })
 
+process.env.OPENFDS_DISABLE_EMBEDDED_WEB_UI = "true"
 process.env.OPENCODE_DISABLE_EMBEDDED_WEB_UI = "true"
 
 const APP_NAMES: Record<string, string> = {
-  dev: "OpenCode Dev",
-  beta: "OpenCode Beta",
-  prod: "OpenCode",
+  dev: "OpenFDS Dev",
+  beta: "OpenFDS Beta",
+  prod: "OpenFDS",
 }
 const APP_IDS: Record<string, string> = {
-  dev: "ai.opencode.desktop.dev",
-  beta: "ai.opencode.desktop.beta",
-  prod: "ai.opencode.desktop",
+  dev: "ai.openfds.desktop.dev",
+  beta: "ai.openfds.desktop.beta",
+  prod: "ai.openfds.desktop",
 }
-app.setName(app.isPackaged ? APP_NAMES[CHANNEL] : "OpenCode Dev")
-app.setPath("userData", join(app.getPath("appData"), app.isPackaged ? APP_IDS[CHANNEL] : "ai.opencode.desktop.dev"))
+app.setName(app.isPackaged ? APP_NAMES[CHANNEL] : "OpenFDS Dev")
+app.setPath("userData", join(app.getPath("appData"), app.isPackaged ? APP_IDS[CHANNEL] : "ai.openfds.desktop.dev"))
 const { autoUpdater } = pkg
 
 import type { InitStep, ServerReadyData, SqliteMigrationProgress, WslConfig } from "../preload/types"
@@ -67,7 +68,7 @@ function setupApp() {
   }
 
   app.on("second-instance", (_event: Event, argv: string[]) => {
-    const urls = argv.filter((arg: string) => arg.startsWith("opencode://"))
+    const urls = argv.filter((arg: string) => arg.startsWith("openfds://") || arg.startsWith("opencode://"))
     if (urls.length) {
       logger.log("deep link received via second-instance", { urls })
       emitDeepLinks(urls)
@@ -97,6 +98,7 @@ function setupApp() {
   }
 
   void app.whenReady().then(async () => {
+    app.setAsDefaultProtocolClient("openfds")
     app.setAsDefaultProtocolClient("opencode")
     setDockIcon()
     setupAutoUpdater()
@@ -137,7 +139,7 @@ async function initialize() {
   server = listener
   serverReady.resolve({
     url,
-    username: "opencode",
+    username: "openfds",
     password,
   })
 
@@ -268,7 +270,7 @@ function ensureLoopbackNoProxy() {
 }
 
 async function getSidecarPort() {
-  const fromEnv = process.env.OPENCODE_PORT
+  const fromEnv = process.env.OPENFDS_PORT ?? process.env.OPENCODE_PORT
   if (fromEnv) {
     const parsed = Number.parseInt(fromEnv, 10)
     if (!Number.isNaN(parsed)) return parsed
@@ -293,7 +295,7 @@ async function getSidecarPort() {
 function sqliteFileExists() {
   const xdg = process.env.XDG_DATA_HOME
   const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".local", "share")
-  return existsSync(join(base, "opencode", "opencode.db"))
+  return existsSync(join(base, "openfds", "openfds.db")) || existsSync(join(base, "opencode", "opencode.db"))
 }
 
 function setupAutoUpdater() {

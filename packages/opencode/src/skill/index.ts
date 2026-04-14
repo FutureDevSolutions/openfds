@@ -16,6 +16,7 @@ import { ConfigMarkdown } from "../config/markdown"
 import { Glob } from "../util/glob"
 import { Log } from "../util/log"
 import { Discovery } from "./discovery"
+import { BUILTIN_SKILLS } from "./builtin"
 
 export namespace Skill {
   const log = Log.create({ service: "skill" })
@@ -142,6 +143,15 @@ export namespace Skill {
     directory: string,
     worktree: string,
   ) {
+    for (const item of BUILTIN_SKILLS) {
+      state.skills[item.name] = {
+        name: item.name,
+        description: item.description,
+        location: item.location,
+        content: item.content,
+      }
+    }
+
     if (!Flag.OPENCODE_DISABLE_EXTERNAL_SKILLS) {
       for (const dir of EXTERNAL_DIRS) {
         const root = path.join(Global.Path.home, dir)
@@ -238,6 +248,7 @@ export namespace Skill {
 
   export function fmt(list: Info[], opts: { verbose: boolean }) {
     if (list.length === 0) return "No skills are currently available."
+    const location = (value: string) => (/^[a-zA-Z]+:\/\//.test(value) ? value : pathToFileURL(value).href)
     if (opts.verbose) {
       return [
         "<available_skills>",
@@ -247,7 +258,7 @@ export namespace Skill {
             "  <skill>",
             `    <name>${skill.name}</name>`,
             `    <description>${skill.description}</description>`,
-            `    <location>${pathToFileURL(skill.location).href}</location>`,
+            `    <location>${location(skill.location)}</location>`,
             "  </skill>",
           ]),
         "</available_skills>",

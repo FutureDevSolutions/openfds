@@ -243,6 +243,7 @@ export const ApplyPatchTool = Tool.define(
         yield* lsp.touchFile(target, true)
       }
       const diagnostics = yield* lsp.diagnostics()
+      const status = yield* lsp.status()
 
       // Generate output summary
       const summaryLines = fileChanges.map((change) => {
@@ -260,10 +261,20 @@ export const ApplyPatchTool = Tool.define(
       for (const change of fileChanges) {
         if (change.type === "delete") continue
         const target = change.movePath ?? change.filePath
-        const block = LSP.Diagnostic.report(target, diagnostics[AppFileSystem.normalizePath(target)] ?? [])
-        if (!block) continue
+        const selected = LSP.Diagnostic.select({
+          file: AppFileSystem.normalizePath(target),
+          diagnostics,
+          status,
+          spill: 2,
+        })
+        if (!selected.current && selected.related.length === 0) continue
         const rel = path.relative(Instance.worktree, target).replaceAll("\\", "/")
-        output += `\n\nLSP errors detected in ${rel}, please fix:\n${block}`
+        if (selected.current) {
+          output += `\n\nLSP errors detected in ${rel}, please fix:\n${selected.current}`
+        }
+        if (selected.related.length > 0) {
+          output += `\n\nLSP errors detected in related files:\n${selected.related.map((item) => item.block).join("\n")}`
+        }
       }
 
       return {

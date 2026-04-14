@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+
+if (process.env.OPENCODE_BIN_PATH === undefined && process.env.OPENFDS_BIN_PATH) {
+  process.env.OPENCODE_BIN_PATH = process.env.OPENFDS_BIN_PATH
+}
+
+require("./opencode")

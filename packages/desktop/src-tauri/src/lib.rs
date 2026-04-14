@@ -306,9 +306,14 @@ pub fn run() {
     export_types(&builder);
 
     #[cfg(all(target_os = "macos", not(debug_assertions)))]
-    let _ = std::process::Command::new("killall")
-        .arg("opencode-cli")
-        .output();
+    {
+        let _ = std::process::Command::new("killall")
+            .arg("openfds-cli")
+            .output();
+        let _ = std::process::Command::new("killall")
+            .arg("opencode-cli")
+            .output();
+    }
 
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -437,7 +442,7 @@ async fn initialize(app: AppHandle) {
     let (ready_tx, ready_rx) = oneshot::channel();
     let _ = ready_tx.send(ServerReadyData {
         url: url.clone(),
-        username: Some("opencode".to_string()),
+        username: Some("openfds".to_string()),
         password: Some(password),
     });
     app.manage(SidecarReady(ready_rx.shared()));
@@ -549,8 +554,10 @@ fn spawn_cli_sync_task(app: AppHandle) {
 
 
 fn get_sidecar_port() -> u32 {
-    option_env!("OPENCODE_PORT")
+    option_env!("OPENFDS_PORT")
         .map(|s| s.to_string())
+        .or_else(|| option_env!("OPENCODE_PORT").map(|s| s.to_string()))
+        .or_else(|| std::env::var("OPENFDS_PORT").ok())
         .or_else(|| std::env::var("OPENCODE_PORT").ok())
         .and_then(|port_str| port_str.parse().ok())
         .unwrap_or_else(|| {
@@ -581,7 +588,15 @@ fn opencode_db_path() -> Result<PathBuf, &'static str> {
         }
     };
 
-    Ok(data_home.join("opencode").join("opencode.db"))
+    let next = data_home.join("openfds").join("openfds.db");
+    if next.exists() {
+        return Ok(next);
+    }
+    let legacy = data_home.join("opencode").join("opencode.db");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    Ok(next)
 }
 
 // Creates a `once` listener for the specified event and returns a future that resolves

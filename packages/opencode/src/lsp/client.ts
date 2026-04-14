@@ -15,6 +15,7 @@ import { Instance } from "../project/instance"
 import { Filesystem } from "../util/filesystem"
 
 const DIAGNOSTICS_DEBOUNCE_MS = 150
+const DIAGNOSTICS_QUIET_MS = 400
 
 export namespace LSPClient {
   const log = Log.create({ service: "lsp.client" })
@@ -50,15 +51,15 @@ export namespace LSPClient {
     )
 
     const diagnostics = new Map<string, Diagnostic[]>()
+    let lastDiagnosticsAt: number | undefined
     connection.onNotification("textDocument/publishDiagnostics", (params) => {
       const filePath = Filesystem.normalizePath(fileURLToPath(params.uri))
       l.info("textDocument/publishDiagnostics", {
         path: filePath,
         count: params.diagnostics.length,
       })
-      const exists = diagnostics.has(filePath)
       diagnostics.set(filePath, params.diagnostics)
-      if (!exists && input.serverID === "typescript") return
+      lastDiagnosticsAt = Date.now()
       Bus.publish(Event.Diagnostics, { path: filePath, serverID: input.serverID })
     })
     connection.onRequest("window/workDoneProgress/create", (params) => {
@@ -207,23 +208,38 @@ export namespace LSPClient {
       get diagnostics() {
         return diagnostics
       },
+      get lastDiagnosticsAt() {
+        return lastDiagnosticsAt
+      },
       async waitForDiagnostics(input: { path: string }) {
         const normalizedPath = Filesystem.normalizePath(
           path.isAbsolute(input.path) ? input.path : path.resolve(Instance.directory, input.path),
         )
         log.info("waiting for diagnostics", { path: normalizedPath })
-        let unsub: () => void
+        let unsub: (() => void) | undefined
         let debounceTimer: ReturnType<typeof setTimeout> | undefined
+        let quietTimer: ReturnType<typeof setTimeout> | undefined
         return await withTimeout(
           new Promise<void>((resolve) => {
+            const done = () => {
+              if (debounceTimer) clearTimeout(debounceTimer)
+              if (quietTimer) clearTimeout(quietTimer)
+              unsub?.()
+              resolve()
+            }
+
+            quietTimer = setTimeout(() => {
+              log.info("diagnostics quiet timeout", { path: normalizedPath })
+              done()
+            }, DIAGNOSTICS_QUIET_MS)
+
             unsub = Bus.subscribe(Event.Diagnostics, (event) => {
               if (event.properties.path === normalizedPath && event.properties.serverID === result.serverID) {
                 // Debounce to allow LSP to send follow-up diagnostics (e.g., semantic after syntax)
                 if (debounceTimer) clearTimeout(debounceTimer)
                 debounceTimer = setTimeout(() => {
                   log.info("got diagnostics", { path: normalizedPath })
-                  unsub?.()
-                  resolve()
+                  done()
                 }, DIAGNOSTICS_DEBOUNCE_MS)
               }
             })
@@ -233,6 +249,7 @@ export namespace LSPClient {
           .catch(() => {})
           .finally(() => {
             if (debounceTimer) clearTimeout(debounceTimer)
+            if (quietTimer) clearTimeout(quietTimer)
             unsub?.()
           })
       },

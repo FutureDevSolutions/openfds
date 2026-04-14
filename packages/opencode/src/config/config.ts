@@ -60,21 +60,21 @@ export namespace Config {
   function systemManagedConfigDir(): string {
     switch (process.platform) {
       case "darwin":
-        return "/Library/Application Support/opencode"
+        return "/Library/Application Support/openfds"
       case "win32":
-        return path.join(process.env.ProgramData || "C:\\ProgramData", "opencode")
+        return path.join(process.env.ProgramData || "C:\\ProgramData", "openfds")
       default:
-        return "/etc/opencode"
+        return "/etc/openfds"
     }
   }
 
   export function managedConfigDir() {
-    return process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR || systemManagedConfigDir()
+    return process.env.OPENFDS_TEST_MANAGED_CONFIG_DIR || process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR || systemManagedConfigDir()
   }
 
   const managedDir = managedConfigDir()
 
-  const MANAGED_PLIST_DOMAIN = "ai.opencode.managed"
+  const MANAGED_PLIST_DOMAIN = "ai.openfds.managed"
 
   // Keys injected by macOS/MDM into the managed plist that are not OpenCode config
   const PLIST_META = new Set([
@@ -177,7 +177,14 @@ export namespace Config {
       })
       if (!md) continue
 
-      const patterns = ["/.opencode/command/", "/.opencode/commands/", "/command/", "/commands/"]
+      const patterns = [
+        "/.openfds/command/",
+        "/.openfds/commands/",
+        "/.opencode/command/",
+        "/.opencode/commands/",
+        "/command/",
+        "/commands/",
+      ]
       const file = rel(item, patterns) ?? path.basename(item)
       const name = trim(file)
 
@@ -216,7 +223,14 @@ export namespace Config {
       })
       if (!md) continue
 
-      const patterns = ["/.opencode/agent/", "/.opencode/agents/", "/agent/", "/agents/"]
+      const patterns = [
+        "/.openfds/agent/",
+        "/.openfds/agents/",
+        "/.opencode/agent/",
+        "/.opencode/agents/",
+        "/agent/",
+        "/agents/",
+      ]
       const file = rel(item, patterns) ?? path.basename(item)
       const agentName = trim(file)
 
@@ -732,7 +746,7 @@ export namespace Config {
       port: z.number().int().positive().optional().describe("Port to listen on"),
       hostname: z.string().optional().describe("Hostname to listen on"),
       mdns: z.boolean().optional().describe("Enable mDNS service discovery"),
-      mdnsDomain: z.string().optional().describe("Custom domain name for mDNS service (default: opencode.local)"),
+      mdnsDomain: z.string().optional().describe("Custom domain name for mDNS service (default: openfds.local)"),
       cors: z.array(z.string()).optional().describe("Additional domains to allow for CORS"),
     })
     .strict()
@@ -935,6 +949,7 @@ export namespace Config {
           // subagent
           general: Agent.optional(),
           explore: Agent.optional(),
+          container: Agent.optional(),
           // specialized
           title: Agent.optional(),
           summary: Agent.optional(),
@@ -1085,9 +1100,7 @@ export namespace Config {
   export class Service extends Context.Service<Service, Interface>()("@opencode/Config") {}
 
   function globalConfigFile() {
-    const candidates = ["opencode.jsonc", "opencode.json", "config.json"].map((file) =>
-      path.join(Global.Path.config, file),
-    )
+    const candidates = ["openfds.jsonc", "openfds.json"].map((file) => path.join(Global.Path.config, file))
     for (const file of candidates) {
       if (existsSync(file)) return file
     }
@@ -1239,7 +1252,14 @@ export namespace Config {
       const loadGlobal = Effect.fnUntraced(function* () {
         let result: Info = pipe(
           {},
+          mergeDeep(yield* loadFile(path.join(Global.Path.legacy.config, "config.json"))),
+          mergeDeep(yield* loadFile(path.join(Global.Path.legacy.config, "openfds.json"))),
+          mergeDeep(yield* loadFile(path.join(Global.Path.legacy.config, "openfds.jsonc"))),
+          mergeDeep(yield* loadFile(path.join(Global.Path.legacy.config, "opencode.json"))),
+          mergeDeep(yield* loadFile(path.join(Global.Path.legacy.config, "opencode.jsonc"))),
           mergeDeep(yield* loadFile(path.join(Global.Path.config, "config.json"))),
+          mergeDeep(yield* loadFile(path.join(Global.Path.config, "openfds.json"))),
+          mergeDeep(yield* loadFile(path.join(Global.Path.config, "openfds.jsonc"))),
           mergeDeep(yield* loadFile(path.join(Global.Path.config, "opencode.json"))),
           mergeDeep(yield* loadFile(path.join(Global.Path.config, "opencode.jsonc"))),
         )
@@ -1407,7 +1427,7 @@ export namespace Config {
 
         if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
           for (const file of yield* Effect.promise(() =>
-            ConfigPaths.projectFiles("opencode", ctx.directory, ctx.worktree),
+            ConfigPaths.projectFiles(["opencode", "openfds"], ctx.directory, ctx.worktree),
           )) {
             yield* merge(file, yield* loadFile(file), "local")
           }
@@ -1426,8 +1446,8 @@ export namespace Config {
         const deps: Fiber.Fiber<void, never>[] = []
 
         for (const dir of unique(directories)) {
-          if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
-            for (const file of ["opencode.json", "opencode.jsonc"]) {
+          if (dir.endsWith(".openfds") || dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
+            for (const file of ["opencode.json", "opencode.jsonc", "openfds.json", "openfds.jsonc"]) {
               const source = path.join(dir, file)
               log.debug(`loading config from ${source}`)
               yield* merge(source, yield* loadFile(source))
@@ -1506,7 +1526,7 @@ export namespace Config {
         }
 
         if (existsSync(managedDir)) {
-          for (const file of ["opencode.json", "opencode.jsonc"]) {
+          for (const file of ["opencode.json", "opencode.jsonc", "openfds.json", "openfds.jsonc"]) {
             const source = path.join(managedDir, file)
             yield* merge(source, yield* loadFile(source), "global")
           }

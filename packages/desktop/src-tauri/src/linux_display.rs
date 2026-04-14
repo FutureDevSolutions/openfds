@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 
-use crate::constants::SETTINGS_STORE;
+use crate::constants::{LEGACY_SETTINGS_STORE, SETTINGS_STORE};
 
 pub const LINUX_DISPLAY_CONFIG_KEY: &str = "linuxDisplayConfig";
 
@@ -13,25 +13,47 @@ struct DisplayConfig {
     wayland: Option<bool>,
 }
 
-fn dir() -> Option<PathBuf> {
-    Some(dirs::data_dir()?.join(if cfg!(debug_assertions) {
-        "ai.opencode.desktop.dev"
+fn dirs() -> Option<Vec<PathBuf>> {
+    let data = dirs::data_dir()?;
+    Some(if cfg!(debug_assertions) {
+        vec![
+            data.join("ai.openfds.desktop.dev"),
+            data.join("ai.opencode.desktop.dev"),
+        ]
     } else {
-        "ai.opencode.desktop"
-    }))
+        vec![data.join("ai.openfds.desktop"), data.join("ai.opencode.desktop")]
+    })
 }
 
-fn path() -> Option<PathBuf> {
-    dir().map(|dir| dir.join(SETTINGS_STORE))
+fn paths() -> Option<Vec<PathBuf>> {
+    dirs().map(|dirs| {
+        let mut list = Vec::with_capacity(dirs.len() * 2);
+        for dir in dirs {
+            list.push(dir.join(SETTINGS_STORE));
+            list.push(dir.join(LEGACY_SETTINGS_STORE));
+        }
+        list
+    })
 }
 
 pub fn read_wayland() -> Option<bool> {
-    let raw = std::fs::read_to_string(path()?).ok()?;
-    let root = serde_json::from_str::<serde_json::Value>(&raw)
-        .ok()?
-        .get(LINUX_DISPLAY_CONFIG_KEY)
-        .cloned()?;
-    serde_json::from_value::<DisplayConfig>(root).ok()?.wayland
+    for p in paths()? {
+        let raw = match std::fs::read_to_string(p) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let root = match serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .and_then(|v| v.get(LINUX_DISPLAY_CONFIG_KEY).cloned())
+        {
+            Some(root) => root,
+            None => continue,
+        };
+        if let Some(v) = serde_json::from_value::<DisplayConfig>(root).ok().and_then(|cfg| cfg.wayland) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 pub fn write_wayland(app: &AppHandle, value: bool) -> Result<(), String> {

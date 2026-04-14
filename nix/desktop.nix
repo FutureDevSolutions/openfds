@@ -24,7 +24,7 @@
   opencode,
 }:
 rustPlatform.buildRustPackage (finalAttrs: {
-  pname = "opencode-desktop";
+  pname = "openfds-desktop";
   inherit (opencode)
     version
     src
@@ -72,7 +72,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
     patchShebangs packages/desktop/node_modules
 
     mkdir -p packages/desktop/src-tauri/sidecars
-    cp ${opencode}/bin/opencode packages/desktop/src-tauri/sidecars/opencode-cli-${stdenv.hostPlatform.rust.rustcTarget}
+    cp ${opencode}/bin/openfds packages/desktop/src-tauri/sidecars/openfds-cli-${stdenv.hostPlatform.rust.rustcTarget}
   '';
 
   # see publish-tauri job in .github/workflows/publish.yml
@@ -86,15 +86,23 @@ rustPlatform.buildRustPackage (finalAttrs: {
   # should be removed once binary is renamed or decided otherwise
   # darwin output is a .app bundle so no conflict
   postFixup = lib.optionalString stdenv.hostPlatform.isLinux ''
-    mv $out/bin/OpenCode $out/bin/opencode-desktop
-    sed -i 's|^Exec=OpenCode$|Exec=opencode-desktop|' $out/share/applications/OpenCode.desktop
+    if [ -e $out/bin/OpenFDS ]; then
+      mv $out/bin/OpenFDS $out/bin/openfds-desktop
+    elif [ -e $out/bin/OpenCode ]; then
+      mv $out/bin/OpenCode $out/bin/openfds-desktop
+    fi
+    if [ -e $out/share/applications/OpenFDS.desktop ]; then
+      sed -i 's|^Exec=OpenFDS$|Exec=openfds-desktop|' $out/share/applications/OpenFDS.desktop
+    elif [ -e $out/share/applications/OpenCode.desktop ]; then
+      sed -i 's|^Exec=OpenCode$|Exec=openfds-desktop|' $out/share/applications/OpenCode.desktop
+    fi
   '';
 
   meta = {
-    description = "OpenCode Desktop App";
-    homepage = "https://opencode.ai";
+    description = "OpenFDS Desktop App";
+    homepage = "https://github.com/anomalyco/openfds";
     license = lib.licenses.mit;
-    mainProgram = "opencode-desktop";
+    mainProgram = "openfds-desktop";
     inherit (opencode.meta) platforms;
   };
 })

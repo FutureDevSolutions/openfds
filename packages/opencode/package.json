@@ -17,6 +17,7 @@
     "db": "bun drizzle-kit"
   },
   "bin": {
+    "openfds": "./bin/openfds",
     "opencode": "./bin/opencode"
   },
   "exports": {

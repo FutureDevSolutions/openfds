@@ -15,8 +15,6 @@ import { Instance } from "../project/instance"
 import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
 
-const MAX_PROJECT_DIAGNOSTICS_FILES = 5
-
 export const WriteTool = Tool.define(
   "write",
   Effect.gen(function* () {
@@ -66,19 +64,18 @@ export const WriteTool = Tool.define(
           let output = "Wrote file successfully."
           yield* lsp.touchFile(filepath, true)
           const diagnostics = yield* lsp.diagnostics()
-          const normalizedFilepath = AppFileSystem.normalizePath(filepath)
-          let projectDiagnosticsCount = 0
-          for (const [file, issues] of Object.entries(diagnostics)) {
-            const current = file === normalizedFilepath
-            if (!current && projectDiagnosticsCount >= MAX_PROJECT_DIAGNOSTICS_FILES) continue
-            const block = LSP.Diagnostic.report(current ? filepath : file, issues)
-            if (!block) continue
-            if (current) {
-              output += `\n\nLSP errors detected in this file, please fix:\n${block}`
-              continue
-            }
-            projectDiagnosticsCount++
-            output += `\n\nLSP errors detected in other files:\n${block}`
+          const status = yield* lsp.status()
+          const selected = LSP.Diagnostic.select({
+            file: AppFileSystem.normalizePath(filepath),
+            diagnostics,
+            status,
+            spill: 2,
+          })
+          if (selected.current) {
+            output += `\n\nLSP errors detected in this file, please fix:\n${selected.current}`
+          }
+          if (selected.related.length > 0) {
+            output += `\n\nLSP errors detected in related files:\n${selected.related.map((item) => item.block).join("\n")}`
           }
 
           return {

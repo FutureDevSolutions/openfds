@@ -28,11 +28,27 @@ export const NotFoundError = NamedError.create(
 const log = Log.create({ service: "db" })
 
 export namespace Database {
-  export function getChannelPath() {
+  function legacyChannelPath() {
     if (["latest", "beta", "prod"].includes(CHANNEL) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
-      return path.join(Global.Path.data, "opencode.db")
+      return path.join(Global.Path.legacy.data, "opencode.db")
     const safe = CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")
-    return path.join(Global.Path.data, `opencode-${safe}.db`)
+    return path.join(Global.Path.legacy.data, `opencode-${safe}.db`)
+  }
+
+  export function getChannelPath() {
+    const legacy = legacyChannelPath()
+    if (["latest", "beta", "prod"].includes(CHANNEL) || Flag.OPENCODE_DISABLE_CHANNEL_DB)
+      return existsSync(path.join(Global.Path.data, "openfds.db"))
+        ? path.join(Global.Path.data, "openfds.db")
+        : existsSync(legacy)
+          ? legacy
+          : path.join(Global.Path.data, "openfds.db")
+    const safe = CHANNEL.replace(/[^a-zA-Z0-9._-]/g, "-")
+    const next = path.join(Global.Path.data, `openfds-${safe}.db`)
+    const old = path.join(Global.Path.legacy.data, `opencode-${safe}.db`)
+    if (existsSync(next)) return next
+    if (existsSync(old)) return old
+    return next
   }
 
   export const Path = iife(() => {

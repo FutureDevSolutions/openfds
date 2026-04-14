@@ -134,6 +134,7 @@ export namespace Agent {
                   },
                   edit: {
                     "*": "deny",
+                    [path.join(".openfds", "plans", "*.md")]: "allow",
                     [path.join(".opencode", "plans", "*.md")]: "allow",
                     [path.relative(Instance.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]:
                       "allow",
@@ -172,6 +173,7 @@ export namespace Agent {
                   websearch: "allow",
                   codesearch: "allow",
                   read: "allow",
+                  lsp: "allow",
                   external_directory: {
                     "*": "ask",
                     ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
@@ -181,6 +183,21 @@ export namespace Agent {
               ),
               description: `Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.`,
               prompt: PROMPT_EXPLORE,
+              options: {},
+              mode: "subagent",
+              native: true,
+            },
+            container: {
+              name: "container",
+              description:
+                "Specialized for Dockerfiles, compose/k8s YAML, runtime envs, healthchecks, and image-size optimization.",
+              permission: Permission.merge(
+                defaults,
+                Permission.fromConfig({
+                  todowrite: "deny",
+                }),
+                user,
+              ),
               options: {},
               mode: "subagent",
               native: true,

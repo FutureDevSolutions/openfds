@@ -47,6 +47,7 @@ import { Bus } from "../bus"
 import { Agent } from "../agent/agent"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
+import { File } from "@/file"
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
@@ -87,6 +88,7 @@ export namespace ToolRegistry {
     | Session.Service
     | Provider.Service
     | LSP.Service
+    | File.Service
     | FileTime.Service
     | Instruction.Service
     | AppFileSystem.Service
@@ -221,7 +223,7 @@ export namespace ToolRegistry {
               tool.code,
               tool.skill,
               tool.patch,
-              ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [tool.lsp] : []),
+              tool.lsp,
               ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [tool.plan] : []),
             ],
             task: tool.task,
@@ -337,6 +339,7 @@ export namespace ToolRegistry {
       Layer.provide(Session.defaultLayer),
       Layer.provide(Provider.defaultLayer),
       Layer.provide(LSP.defaultLayer),
+      Layer.provide(File.defaultLayer),
       Layer.provide(FileTime.defaultLayer),
       Layer.provide(Instruction.defaultLayer),
       Layer.provide(AppFileSystem.defaultLayer),

@@ -9,6 +9,7 @@ import DESCRIPTION from "./grep.txt"
 import { Tool } from "./tool"
 
 const MAX_LINE_LENGTH = 2000
+const MAX_SORTED_ROWS = 600
 
 export const GrepTool = Tool.define(
   "grep",
@@ -67,7 +68,8 @@ export const GrepTool = Tool.define(
           })
           if (result.items.length === 0) return empty
 
-          const rows = result.items.map((item) => ({
+          const capped = result.items.length > MAX_SORTED_ROWS
+          const rows = result.items.slice(0, MAX_SORTED_ROWS).map((item) => ({
             path: AppFileSystem.resolve(
               path.isAbsolute(item.path.text) ? item.path.text : path.join(cwd, item.path.text),
             ),
@@ -100,12 +102,14 @@ export const GrepTool = Tool.define(
           matches.sort((a, b) => b.mtime - a.mtime)
 
           const limit = 100
-          const truncated = matches.length > limit
+          const truncated = matches.length > limit || capped
           const final = truncated ? matches.slice(0, limit) : matches
           if (final.length === 0) return empty
 
           const total = matches.length
-          const output = [`Found ${total} matches${truncated ? ` (showing first ${limit})` : ""}`]
+          const output = [
+            `${capped ? "Found at least" : "Found"} ${total} matches${truncated ? ` (showing first ${limit})` : ""}`,
+          ]
 
           let current = ""
           for (const match of final) {
@@ -122,7 +126,9 @@ export const GrepTool = Tool.define(
           if (truncated) {
             output.push("")
             output.push(
-              `(Results truncated: showing ${limit} of ${total} matches (${total - limit} hidden). Consider using a more specific path or pattern.)`,
+              capped
+                ? `(Results truncated early for performance: processed ${MAX_SORTED_ROWS} matches, showing ${limit}. Narrow your path or pattern for complete results.)`
+                : `(Results truncated: showing ${limit} of ${total} matches (${total - limit} hidden). Consider using a more specific path or pattern.)`,
             )
           }
 

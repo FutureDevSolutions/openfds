@@ -40,8 +40,10 @@ impl CommandWrapper for WinCreationFlags {
     }
 }
 
-const CLI_INSTALL_DIR: &str = ".opencode/bin";
-const CLI_BINARY_NAME: &str = "opencode";
+const CLI_INSTALL_DIR: &str = ".openfds/bin";
+const CLI_LEGACY_INSTALL_DIR: &str = ".opencode/bin";
+const CLI_BINARY_NAME: &str = "openfds";
+const CLI_LEGACY_BINARY_NAME: &str = "opencode";
 const SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(serde::Deserialize, Debug)]
@@ -103,19 +105,35 @@ pub async fn get_config(app: &AppHandle) -> Option<Config> {
 
 fn get_cli_install_path() -> Option<std::path::PathBuf> {
     std::env::var("HOME").ok().map(|home| {
-        std::path::PathBuf::from(home)
-            .join(CLI_INSTALL_DIR)
-            .join(CLI_BINARY_NAME)
+        let root = std::path::PathBuf::from(home);
+        let next = root.join(CLI_INSTALL_DIR).join(CLI_BINARY_NAME);
+        if next.exists() {
+            return next;
+        }
+        let legacy = root.join(CLI_LEGACY_INSTALL_DIR).join(CLI_LEGACY_BINARY_NAME);
+        if legacy.exists() {
+            return legacy;
+        }
+        next
     })
 }
 
 pub fn get_sidecar_path(app: &tauri::AppHandle) -> std::path::PathBuf {
     // Get binary with symlinks support
-    tauri::process::current_binary(&app.env())
+    let dir = tauri::process::current_binary(&app.env())
         .expect("Failed to get current binary")
         .parent()
         .expect("Failed to get parent dir")
-        .join("opencode-cli")
+        .to_path_buf();
+    let next = dir.join("openfds-cli");
+    if next.exists() {
+        return next;
+    }
+    let legacy = dir.join("opencode-cli");
+    if legacy.exists() {
+        return legacy;
+    }
+    next
 }
 
 fn is_cli_installed() -> bool {
@@ -138,7 +156,7 @@ pub fn install_cli(app: tauri::AppHandle) -> Result<String, String> {
         return Err("Sidecar binary not found".to_string());
     }
 
-    let temp_script = std::env::temp_dir().join("opencode-install.sh");
+    let temp_script = std::env::temp_dir().join("openfds-install.sh");
     std::fs::write(&temp_script, INSTALL_SCRIPT)
         .map_err(|e| format!("Failed to write install script: {}", e))?;
 
@@ -400,7 +418,8 @@ pub fn spawn_command(
             let version = app.package_info().version.to_string();
             let mut script = vec![
                 "set -e".to_string(),
-                "BIN=\"$HOME/.opencode/bin/opencode\"".to_string(),
+                "BIN=\"$HOME/.openfds/bin/openfds\"".to_string(),
+                "if [ ! -x \"$BIN\" ] && [ -x \"$HOME/.opencode/bin/opencode\" ]; then BIN=\"$HOME/.opencode/bin/opencode\"; fi".to_string(),
                 "if [ ! -x \"$BIN\" ]; then".to_string(),
                 format!(
                     "  curl -fsSL https://opencode.ai/install | bash -s -- --version {} --no-modify-path",
@@ -560,7 +579,7 @@ pub fn serve(
     tracing::info!(port, "Spawning sidecar");
 
     let envs = [
-        ("OPENCODE_SERVER_USERNAME", "opencode".to_string()),
+        ("OPENCODE_SERVER_USERNAME", "openfds".to_string()),
         ("OPENCODE_SERVER_PASSWORD", password.to_string()),
     ];
 
@@ -569,7 +588,7 @@ pub fn serve(
         format!("--print-logs --log-level WARN serve --hostname {hostname} --port {port}").as_str(),
         &envs,
     )
-    .expect("Failed to spawn opencode");
+    .expect("Failed to spawn openfds");
 
     let mut exit_tx = Some(exit_tx);
     tokio::spawn(

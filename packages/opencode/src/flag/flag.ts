@@ -1,5 +1,12 @@
 import { Config } from "effect"
 
+for (const [key, value] of Object.entries(process.env)) {
+  if (!key.startsWith("OPENFDS_")) continue
+  if (value === undefined) continue
+  const legacy = key.replace(/^OPENFDS_/, "OPENCODE_")
+  if (process.env[legacy] === undefined) process.env[legacy] = value
+}
+
 function truthy(key: string) {
   const value = process.env[key]?.toLowerCase()
   return value === "true" || value === "1"

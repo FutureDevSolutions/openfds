@@ -1,6 +1,6 @@
-# OpenCode Desktop
+# OpenFDS Desktop
 
-Native OpenCode desktop app, built with Tauri v2.
+Native OpenFDS desktop app, built with Tauri v2.
 
 ## Prerequisites
 

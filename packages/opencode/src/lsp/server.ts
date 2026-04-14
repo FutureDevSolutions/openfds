@@ -56,6 +56,64 @@ export namespace LSPServer {
     }
   }
 
+  const LOCKFILES = ["package-lock.json", "bun.lockb", "bun.lock", "pnpm-lock.yaml", "yarn.lock"] as const
+
+  const TYPESCRIPT_ROOTS = [
+    "tsconfig.json",
+    "tsconfig.base.json",
+    "tsconfig.app.json",
+    "jsconfig.json",
+    "next.config.ts",
+    "next.config.js",
+    "next.config.mjs",
+    "nest-cli.json",
+    "pnpm-workspace.yaml",
+    "turbo.json",
+    "nx.json",
+    "package.json",
+    ...LOCKFILES,
+  ] as const
+
+  const ASTRO_ROOTS = [
+    "astro.config.mjs",
+    "astro.config.ts",
+    "astro.config.js",
+    "tsconfig.json",
+    "tsconfig.base.json",
+    "package.json",
+    ...LOCKFILES,
+  ] as const
+
+  const YAML_ROOTS = ["pnpm-workspace.yaml", "docker-compose.yml", "docker-compose.yaml", "package.json", ...LOCKFILES] as const
+
+  const SHELL_ROOTS = ["package.json", ".git", ...LOCKFILES] as const
+
+  async function localBin(root: string, name: string) {
+    const ext = process.platform === "win32" ? [".cmd", ".exe", ""] : [""]
+    const targets = ext.map((item) => path.join("node_modules", ".bin", name + item))
+    const files = Filesystem.up({
+      targets,
+      start: root,
+      stop: Instance.worktree,
+    })
+    const first = await files.next()
+    await files.return()
+    return first.value
+  }
+
+  async function resolveBin(root: string, input: { binary: string; pkg?: string }) {
+    const local = await localBin(root, input.binary)
+    if (local) return local
+    const global = which(input.binary)
+    if (global) return global
+    if (!input.pkg || Flag.OPENCODE_DISABLE_LSP_DOWNLOAD) return
+    return Npm.which(input.pkg)
+  }
+
+  function resolveTsServer(root: string) {
+    return Module.resolve("typescript/lib/tsserver.js", root) || Module.resolve("typescript/lib/tsserver.js", Instance.directory)
+  }
+
   export interface Info {
     id: string
     extensions: string[]
@@ -94,16 +152,16 @@ export namespace LSPServer {
 
   export const Typescript: Info = {
     id: "typescript",
-    root: NearestRoot(
-      ["package-lock.json", "bun.lockb", "bun.lock", "pnpm-lock.yaml", "yarn.lock"],
-      ["deno.json", "deno.jsonc"],
-    ),
+    root: NearestRoot([...TYPESCRIPT_ROOTS], ["deno.json", "deno.jsonc"]),
     extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
     async spawn(root) {
-      const tsserver = Module.resolve("typescript/lib/tsserver.js", Instance.directory)
+      const tsserver = resolveTsServer(root)
       log.info("typescript server", { tsserver })
       if (!tsserver) return
-      const bin = await Npm.which("typescript-language-server")
+      const bin = await resolveBin(root, {
+        binary: "typescript-language-server",
+        pkg: "typescript-language-server",
+      })
       if (!bin) return
       const proc = spawn(bin, ["--stdio"], {
         cwd: root,
@@ -1031,22 +1089,22 @@ export namespace LSPServer {
   export const Astro: Info = {
     id: "astro",
     extensions: [".astro"],
-    root: NearestRoot(["package-lock.json", "bun.lockb", "bun.lock", "pnpm-lock.yaml", "yarn.lock"]),
+    root: NearestRoot([...ASTRO_ROOTS]),
     async spawn(root) {
-      const tsserver = Module.resolve("typescript/lib/tsserver.js", Instance.directory)
+      const tsserver = resolveTsServer(root)
       if (!tsserver) {
         log.info("typescript not found, required for Astro language server")
         return
       }
       const tsdk = path.dirname(tsserver)
 
-      let binary = which("astro-ls")
+      let binary = await resolveBin(root, {
+        binary: "astro-ls",
+        pkg: "@astrojs/language-server",
+      })
       const args: string[] = []
       if (!binary) {
-        if (Flag.OPENCODE_DISABLE_LSP_DOWNLOAD) return
-        const resolved = await Npm.which("@astrojs/language-server")
-        if (!resolved) return
-        binary = resolved
+        return
       }
       args.push("--stdio")
       const proc = spawn(binary, args, {
@@ -1289,15 +1347,15 @@ export namespace LSPServer {
   export const YamlLS: Info = {
     id: "yaml-ls",
     extensions: [".yaml", ".yml"],
-    root: NearestRoot(["package-lock.json", "bun.lockb", "bun.lock", "pnpm-lock.yaml", "yarn.lock"]),
+    root: NearestRoot([...YAML_ROOTS]),
     async spawn(root) {
-      let binary = which("yaml-language-server")
+      let binary = await resolveBin(root, {
+        binary: "yaml-language-server",
+        pkg: "yaml-language-server",
+      })
       const args: string[] = []
       if (!binary) {
-        if (Flag.OPENCODE_DISABLE_LSP_DOWNLOAD) return
-        const resolved = await Npm.which("yaml-language-server")
-        if (!resolved) return
-        binary = resolved
+        return
       }
       args.push("--stdio")
       const proc = spawn(binary, args, {
@@ -1540,15 +1598,15 @@ export namespace LSPServer {
   export const BashLS: Info = {
     id: "bash",
     extensions: [".sh", ".bash", ".zsh", ".ksh"],
-    root: async () => Instance.directory,
+    root: NearestRoot([...SHELL_ROOTS]),
     async spawn(root) {
-      let binary = which("bash-language-server")
+      let binary = await resolveBin(root, {
+        binary: "bash-language-server",
+        pkg: "bash-language-server",
+      })
       const args: string[] = []
       if (!binary) {
-        if (Flag.OPENCODE_DISABLE_LSP_DOWNLOAD) return
-        const resolved = await Npm.which("bash-language-server")
-        if (!resolved) return
-        binary = resolved
+        return
       }
       args.push("start")
       const proc = spawn(binary, args, {
@@ -1735,15 +1793,15 @@ export namespace LSPServer {
   export const DockerfileLS: Info = {
     id: "dockerfile",
     extensions: [".dockerfile", "Dockerfile"],
-    root: async () => Instance.directory,
+    root: NearestRoot([...YAML_ROOTS]),
     async spawn(root) {
-      let binary = which("docker-langserver")
+      let binary = await resolveBin(root, {
+        binary: "docker-langserver",
+        pkg: "dockerfile-language-server-nodejs",
+      })
       const args: string[] = []
       if (!binary) {
-        if (Flag.OPENCODE_DISABLE_LSP_DOWNLOAD) return
-        const resolved = await Npm.which("dockerfile-language-server-nodejs")
-        if (!resolved) return
-        binary = resolved
+        return
       }
       args.push("--stdio")
       const proc = spawn(binary, args, {

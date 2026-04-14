@@ -57,7 +57,7 @@ export namespace Installation {
 
   export const VERSION = version
   export const CHANNEL = channel
-  export const USER_AGENT = `opencode/${CHANNEL}/${VERSION}/${Flag.OPENCODE_CLIENT}`
+  export const USER_AGENT = `openfds/${CHANNEL}/${VERSION}/${Flag.OPENCODE_CLIENT}`
 
   export function isPreview() {
     return CHANNEL !== "latest"
@@ -136,16 +136,22 @@ export namespace Installation {
         )
 
         const getBrewFormula = Effect.fnUntraced(function* () {
+          const tapOpenfds = yield* text(["brew", "list", "--formula", "anomalyco/tap/openfds"])
+          if (tapOpenfds.includes("openfds")) return "anomalyco/tap/openfds"
           const tapFormula = yield* text(["brew", "list", "--formula", "anomalyco/tap/opencode"])
           if (tapFormula.includes("opencode")) return "anomalyco/tap/opencode"
+          const coreOpenfds = yield* text(["brew", "list", "--formula", "openfds"])
+          if (coreOpenfds.includes("openfds")) return "openfds"
           const coreFormula = yield* text(["brew", "list", "--formula", "opencode"])
           if (coreFormula.includes("opencode")) return "opencode"
-          return "opencode"
+          return "openfds"
         })
 
         const upgradeCurl = Effect.fnUntraced(
           function* (target: string) {
-            const response = yield* httpOk.execute(HttpClientRequest.get("https://opencode.ai/install"))
+            const response = yield* httpOk.execute(
+              HttpClientRequest.get("https://raw.githubusercontent.com/anomalyco/openfds/dev/install"),
+            )
             const body = yield* response.text
             const bodyBytes = new TextEncoder().encode(body)
             const proc = ChildProcess.make("bash", [], {
@@ -166,6 +172,7 @@ export namespace Installation {
         )
 
         const methodImpl = Effect.fn("Installation.method")(function* () {
+          if (process.execPath.includes(path.join(".openfds", "bin"))) return "curl" as Method
           if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl" as Method
           if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
           const exec = process.execPath.toLowerCase()
@@ -175,9 +182,9 @@ export namespace Installation {
             { name: "yarn", command: () => text(["yarn", "global", "list"]) },
             { name: "pnpm", command: () => text(["pnpm", "list", "-g", "--depth=0"]) },
             { name: "bun", command: () => text(["bun", "pm", "ls", "-g"]) },
-            { name: "brew", command: () => text(["brew", "list", "--formula", "opencode"]) },
-            { name: "scoop", command: () => text(["scoop", "list", "opencode"]) },
-            { name: "choco", command: () => text(["choco", "list", "--limit-output", "opencode"]) },
+            { name: "brew", command: () => text(["brew", "list", "--formula", "openfds"]) },
+            { name: "scoop", command: () => text(["scoop", "list", "openfds"]) },
+            { name: "choco", command: () => text(["choco", "list", "--limit-output", "openfds"]) },
           ]
 
           checks.sort((a, b) => {
@@ -190,9 +197,9 @@ export namespace Installation {
 
           for (const check of checks) {
             const output = yield* check.command()
-            const installedName =
-              check.name === "brew" || check.name === "choco" || check.name === "scoop" ? "opencode" : "opencode-ai"
-            if (output.includes(installedName)) {
+            const installed = check.name === "brew" || check.name === "choco" || check.name === "scoop"
+            const names = installed ? ["openfds", "opencode"] : ["openfds-ai", "opencode-ai"]
+            if (names.some((name) => output.includes(name))) {
               return check.name
             }
           }
@@ -211,7 +218,7 @@ export namespace Installation {
               return info.formulae[0].versions.stable
             }
             const response = yield* httpOk.execute(
-              HttpClientRequest.get("https://formulae.brew.sh/api/formula/opencode.json").pipe(
+              HttpClientRequest.get("https://formulae.brew.sh/api/formula/openfds.json").pipe(
                 HttpClientRequest.acceptJson,
               ),
             )
@@ -225,7 +232,7 @@ export namespace Installation {
             const registry = reg.endsWith("/") ? reg.slice(0, -1) : reg
             const channel = CHANNEL
             const response = yield* httpOk.execute(
-              HttpClientRequest.get(`${registry}/opencode-ai/${channel}`).pipe(HttpClientRequest.acceptJson),
+              HttpClientRequest.get(`${registry}/openfds-ai/${channel}`).pipe(HttpClientRequest.acceptJson),
             )
             const data = yield* HttpClientResponse.schemaBodyJson(NpmPackage)(response)
             return data.version
@@ -234,7 +241,7 @@ export namespace Installation {
           if (detectedMethod === "choco") {
             const response = yield* httpOk.execute(
               HttpClientRequest.get(
-                "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27opencode%27%20and%20IsLatestVersion&$select=Version",
+                "https://community.chocolatey.org/api/v2/Packages?$filter=Id%20eq%20%27openfds%27%20and%20IsLatestVersion&$select=Version",
               ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json;odata=verbose" })),
             )
             const data = yield* HttpClientResponse.schemaBodyJson(ChocoPackage)(response)
@@ -244,7 +251,7 @@ export namespace Installation {
           if (detectedMethod === "scoop") {
             const response = yield* httpOk.execute(
               HttpClientRequest.get(
-                "https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/opencode.json",
+                "https://raw.githubusercontent.com/ScoopInstaller/Main/master/bucket/openfds.json",
               ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json" })),
             )
             const data = yield* HttpClientResponse.schemaBodyJson(ScoopManifest)(response)
@@ -252,7 +259,7 @@ export namespace Installation {
           }
 
           const response = yield* httpOk.execute(
-            HttpClientRequest.get("https://api.github.com/repos/anomalyco/opencode/releases/latest").pipe(
+            HttpClientRequest.get("https://api.github.com/repos/anomalyco/openfds/releases/latest").pipe(
               HttpClientRequest.acceptJson,
             ),
           )
@@ -267,13 +274,13 @@ export namespace Installation {
               result = yield* upgradeCurl(target)
               break
             case "npm":
-              result = yield* run(["npm", "install", "-g", `opencode-ai@${target}`])
+              result = yield* run(["npm", "install", "-g", `openfds-ai@${target}`])
               break
             case "pnpm":
-              result = yield* run(["pnpm", "install", "-g", `opencode-ai@${target}`])
+              result = yield* run(["pnpm", "install", "-g", `openfds-ai@${target}`])
               break
             case "bun":
-              result = yield* run(["bun", "install", "-g", `opencode-ai@${target}`])
+              result = yield* run(["bun", "install", "-g", `openfds-ai@${target}`])
               break
             case "brew": {
               const formula = yield* getBrewFormula()
@@ -298,10 +305,10 @@ export namespace Installation {
               break
             }
             case "choco":
-              result = yield* run(["choco", "upgrade", "opencode", `--version=${target}`, "-y"])
+              result = yield* run(["choco", "upgrade", "openfds", `--version=${target}`, "-y"])
               break
             case "scoop":
-              result = yield* run(["scoop", "install", `opencode@${target}`])
+              result = yield* run(["scoop", "install", `openfds@${target}`])
               break
             default:
               return yield* new UpgradeFailedError({ stderr: `Unknown method: ${m}` })

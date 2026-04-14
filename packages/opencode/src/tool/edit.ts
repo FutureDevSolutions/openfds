@@ -169,9 +169,19 @@ export const EditTool = Tool.define(
           let output = "Edit applied successfully."
           yield* lsp.touchFile(filePath, true)
           const diagnostics = yield* lsp.diagnostics()
-          const normalizedFilePath = Filesystem.normalizePath(filePath)
-          const block = LSP.Diagnostic.report(filePath, diagnostics[normalizedFilePath] ?? [])
-          if (block) output += `\n\nLSP errors detected in this file, please fix:\n${block}`
+          const status = yield* lsp.status()
+          const selected = LSP.Diagnostic.select({
+            file: Filesystem.normalizePath(filePath),
+            diagnostics,
+            status,
+            spill: 2,
+          })
+          if (selected.current) {
+            output += `\n\nLSP errors detected in this file, please fix:\n${selected.current}`
+          }
+          if (selected.related.length > 0) {
+            output += `\n\nLSP errors detected in related files:\n${selected.related.map((item) => item.block).join("\n")}`
+          }
 
           return {
             metadata: {

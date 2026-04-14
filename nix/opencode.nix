@@ -14,7 +14,7 @@
   node_modules ? callPackage ./node-modules.nix { },
 }:
 stdenvNoCC.mkDerivation (finalAttrs: {
-  pname = "opencode";
+  pname = "openfds";
   inherit (node_modules) version src;
   inherit node_modules;
 
@@ -55,10 +55,10 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   installPhase = ''
     runHook preInstall
 
-    install -Dm755 dist/opencode-*/bin/opencode $out/bin/opencode
-    install -Dm644 schema.json $out/share/opencode/schema.json
+    install -Dm755 dist/openfds-*/bin/openfds $out/bin/openfds
+    install -Dm644 schema.json $out/share/openfds/schema.json
 
-    wrapProgram $out/bin/opencode \
+    wrapProgram $out/bin/openfds \
       --prefix PATH : ${
         lib.makeBinPath (
           [
@@ -74,9 +74,9 @@ stdenvNoCC.mkDerivation (finalAttrs: {
 
   postInstall = lib.optionalString (stdenvNoCC.buildPlatform.canExecute stdenvNoCC.hostPlatform) ''
     # trick yargs into also generating zsh completions
-    installShellCompletion --cmd opencode \
-      --bash <($out/bin/opencode completion) \
-      --zsh <(SHELL=/bin/zsh $out/bin/opencode completion)
+    installShellCompletion --cmd openfds \
+      --bash <($out/bin/openfds completion) \
+      --zsh <(SHELL=/bin/zsh $out/bin/openfds completion)
   '';
 
   nativeInstallCheckInputs = [
@@ -88,14 +88,14 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   versionCheckProgramArg = "--version";
 
   passthru = {
-    jsonschema = "${placeholder "out"}/share/opencode/schema.json";
+    jsonschema = "${placeholder "out"}/share/openfds/schema.json";
   };
 
   meta = {
     description = "The open source coding agent";
-    homepage = "https://opencode.ai/";
+    homepage = "https://github.com/anomalyco/openfds";
     license = lib.licenses.mit;
-    mainProgram = "opencode";
+    mainProgram = "openfds";
     inherit (node_modules.meta) platforms;
   };
 })

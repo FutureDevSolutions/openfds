@@ -23,19 +23,24 @@ function tauriDir(id: string) {
 
 // The Tauri app identifier changes between dev/beta/prod builds.
 const TAURI_APP_IDS: Record<string, string> = {
+  dev: "ai.openfds.desktop.dev",
+  beta: "ai.openfds.desktop.beta",
+  prod: "ai.openfds.desktop",
+}
+const LEGACY_TAURI_APP_IDS: Record<string, string> = {
   dev: "ai.opencode.desktop.dev",
   beta: "ai.opencode.desktop.beta",
   prod: "ai.opencode.desktop",
 }
 function tauriAppId() {
-  return app.isPackaged ? TAURI_APP_IDS[CHANNEL] : "ai.opencode.desktop.dev"
+  return app.isPackaged ? TAURI_APP_IDS[CHANNEL] : "ai.openfds.desktop.dev"
 }
 
 // Migrate a single Tauri .dat file into the corresponding electron-store.
-// `opencode.settings.dat` is special: it maps to the `opencode.settings` store
+// `openfds.settings.dat` is special: it maps to the `openfds.settings` store
 // (the electron-store name without the `.dat` extension). All other .dat files
 // keep their full filename as the electron-store name so they match what the
-// renderer already passes via IPC (e.g. `"default.dat"`, `"opencode.global.dat"`).
+// renderer already passes via IPC (e.g. `"default.dat"`, `"openfds.global.dat"`).
 function migrateFile(datPath: string, filename: string) {
   let data: Record<string, unknown>
   try {
@@ -45,10 +50,15 @@ function migrateFile(datPath: string, filename: string) {
     return
   }
 
-  // opencode.settings.dat → the electron settings store ("opencode.settings").
+  // openfds.settings.dat → the electron settings store ("openfds.settings").
   // All other .dat files keep their full filename as the store name so they match
-  // what the renderer passes via IPC (e.g. "default.dat", "opencode.global.dat").
-  const storeName = filename === "opencode.settings.dat" ? "opencode.settings" : filename
+  // what the renderer passes via IPC (e.g. "default.dat", "openfds.global.dat").
+  const storeName =
+    filename === "openfds.settings.dat" || filename === "opencode.settings.dat"
+      ? "openfds.settings"
+      : filename === "opencode.global.dat"
+        ? "openfds.global.dat"
+        : filename
   const target = getStore(storeName)
   const migrated: string[] = []
   const skipped: string[] = []
@@ -72,18 +82,24 @@ export function migrate() {
     return
   }
 
-  const dir = tauriDir(tauriAppId())
-  log.log("tauri migration: starting", { dir })
+  const dirs = [
+    tauriDir(tauriAppId()),
+    tauriDir(app.isPackaged ? LEGACY_TAURI_APP_IDS[CHANNEL] : "ai.opencode.desktop.dev"),
+  ]
+  log.log("tauri migration: starting", { dirs })
 
-  if (!existsSync(dir)) {
-    log.log("tauri migration: no tauri data directory found, nothing to migrate")
+  const roots = dirs.filter((dir, idx) => dirs.indexOf(dir) === idx && existsSync(dir))
+  if (roots.length === 0) {
+    log.log("tauri migration: no tauri data directories found, nothing to migrate")
     store.set(TAURI_MIGRATED_KEY, true)
     return
   }
 
-  for (const filename of readdirSync(dir)) {
-    if (!filename.endsWith(".dat")) continue
-    migrateFile(join(dir, filename), filename)
+  for (const dir of roots) {
+    for (const filename of readdirSync(dir)) {
+      if (!filename.endsWith(".dat")) continue
+      migrateFile(join(dir, filename), filename)
+    }
   }
 
   log.log("tauri migration: complete")

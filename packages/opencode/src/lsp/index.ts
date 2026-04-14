@@ -13,6 +13,7 @@ import { Process } from "../util/process"
 import { spawn as lspspawn } from "./launch"
 import { Effect, Layer, Context } from "effect"
 import { InstanceState } from "@/effect/instance-state"
+import { AppFileSystem } from "@/filesystem"
 
 export namespace LSP {
   const log = Log.create({ service: "lsp" })
@@ -69,7 +70,11 @@ export namespace LSP {
       id: z.string(),
       name: z.string(),
       root: z.string(),
+      root_absolute: z.string().optional(),
+      healthy: z.boolean(),
       status: z.union([z.literal("connected"), z.literal("error")]),
+      last_diagnostics_at: z.number().optional(),
+      error: z.string().optional(),
     })
     .meta({
       ref: "LSPStatus",
@@ -134,7 +139,7 @@ export namespace LSP {
   interface State {
     clients: LSPClient.Info[]
     servers: Record<string, LSPServer.Info>
-    broken: Set<string>
+    broken: Map<string, string>
     spawning: Map<string, Promise<LSPClient.Info | undefined>>
   }
 
@@ -209,7 +214,7 @@ export namespace LSP {
           const s: State = {
             clients: [],
             servers,
-            broken: new Set(),
+            broken: new Map(),
             spawning: new Map(),
           }
 
@@ -227,18 +232,19 @@ export namespace LSP {
         if (!Instance.containsPath(file)) return [] as LSPClient.Info[]
         const s = yield* InstanceState.get(state)
         return yield* Effect.promise(async () => {
-          const extension = path.parse(file).ext || file
+          const parsed = path.parse(file)
+          const extension = parsed.ext || parsed.base
           const result: LSPClient.Info[] = []
 
           async function schedule(server: LSPServer.Info, root: string, key: string) {
             const handle = await server
               .spawn(root)
               .then((value) => {
-                if (!value) s.broken.add(key)
+                if (!value) s.broken.set(key, "spawn returned no process")
                 return value
               })
               .catch((err) => {
-                s.broken.add(key)
+                s.broken.set(key, err instanceof Error ? err.message : String(err))
                 log.error(`Failed to spawn LSP server ${server.id}`, { error: err })
                 return undefined
               })
@@ -251,13 +257,14 @@ export namespace LSP {
               server: handle,
               root,
             }).catch(async (err) => {
-              s.broken.add(key)
+              s.broken.set(key, err instanceof Error ? err.message : String(err))
               await Process.stop(handle.process)
               log.error(`Failed to initialize LSP client ${server.id}`, { error: err })
               return undefined
             })
 
             if (!client) return undefined
+            s.broken.delete(key)
 
             const existing = s.clients.find((x) => x.root === root && x.serverID === server.id)
             if (existing) {
@@ -274,7 +281,8 @@ export namespace LSP {
 
             const root = await server.root(file)
             if (!root) continue
-            if (s.broken.has(root + server.id)) continue
+            const key = root + "::" + server.id
+            if (s.broken.has(key)) continue
 
             const match = s.clients.find((x) => x.root === root && x.serverID === server.id)
             if (match) {
@@ -282,7 +290,7 @@ export namespace LSP {
               continue
             }
 
-            const inflight = s.spawning.get(root + server.id)
+            const inflight = s.spawning.get(key)
             if (inflight) {
               const client = await inflight
               if (!client) continue
@@ -290,12 +298,12 @@ export namespace LSP {
               continue
             }
 
-            const task = schedule(server, root, root + server.id)
-            s.spawning.set(root + server.id, task)
+            const task = schedule(server, root, key)
+            s.spawning.set(key, task)
 
             task.finally(() => {
-              if (s.spawning.get(root + server.id) === task) {
-                s.spawning.delete(root + server.id)
+              if (s.spawning.get(key) === task) {
+                s.spawning.delete(key)
               }
             })
 
@@ -327,12 +335,33 @@ export namespace LSP {
       const status = Effect.fn("LSP.status")(function* () {
         const s = yield* InstanceState.get(state)
         const result: Status[] = []
+        const live = new Set<string>()
         for (const client of s.clients) {
+          const key = client.root + "::" + client.serverID
+          live.add(key)
           result.push({
             id: client.serverID,
-            name: s.servers[client.serverID].id,
+            name: s.servers[client.serverID]?.id ?? client.serverID,
             root: path.relative(Instance.directory, client.root),
+            root_absolute: client.root,
+            healthy: true,
             status: "connected",
+            last_diagnostics_at: client.lastDiagnosticsAt,
+          })
+        }
+        for (const [key, error] of s.broken.entries()) {
+          if (live.has(key)) continue
+          const idx = key.lastIndexOf("::")
+          const root = idx === -1 ? Instance.directory : key.slice(0, idx)
+          const id = idx === -1 ? key : key.slice(idx + 2)
+          result.push({
+            id,
+            name: s.servers[id]?.id ?? id,
+            root: path.relative(Instance.directory, root),
+            root_absolute: root,
+            healthy: false,
+            status: "error",
+            error,
           })
         }
         return result
@@ -341,12 +370,13 @@ export namespace LSP {
       const hasClients = Effect.fn("LSP.hasClients")(function* (file: string) {
         const s = yield* InstanceState.get(state)
         return yield* Effect.promise(async () => {
-          const extension = path.parse(file).ext || file
+          const parsed = path.parse(file)
+          const extension = parsed.ext || parsed.base
           for (const server of Object.values(s.servers)) {
             if (server.extensions.length && !server.extensions.includes(extension)) continue
             const root = await server.root(file)
             if (!root) continue
-            if (s.broken.has(root + server.id)) continue
+            if (s.broken.has(root + "::" + server.id)) continue
             return true
           }
           return false
@@ -532,6 +562,44 @@ export namespace LSP {
       const more = errors.length - MAX_PER_FILE
       const suffix = more > 0 ? `\n... and ${more} more` : ""
       return `<diagnostics file="${file}">\n${limited.map(pretty).join("\n")}${suffix}\n</diagnostics>`
+    }
+
+    function inRoot(file: string, root: string) {
+      if (file === root) return true
+      const prefix = root.endsWith(path.sep) ? root : root + path.sep
+      return file.startsWith(prefix)
+    }
+
+    export function select(input: {
+      file: string
+      diagnostics: Record<string, LSPClient.Diagnostic[]>
+      status: Status[]
+      spill?: number
+    }) {
+      const limit = input.spill ?? 2
+      const target = AppFileSystem.normalizePath(input.file)
+      const current = report(input.file, input.diagnostics[target] ?? [])
+      const roots = input.status
+        .filter((item) => item.healthy && item.root_absolute)
+        .map((item) => item.root_absolute!)
+        .filter((root) => inRoot(target, root))
+        .toSorted((a, b) => b.length - a.length)
+      const root = roots[0]
+
+      const related: { file: string; block: string }[] = []
+      for (const [file, issues] of Object.entries(input.diagnostics)) {
+        if (file === target) continue
+        if (root && !inRoot(file, root)) continue
+        const block = report(file, issues)
+        if (!block) continue
+        related.push({ file, block })
+        if (related.length >= limit) break
+      }
+
+      return {
+        current,
+        related,
+      }
     }
   }
 }

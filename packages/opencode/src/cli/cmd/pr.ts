@@ -7,7 +7,7 @@ import { Process } from "@/util/process"
 
 export const PrCommand = cmd({
   command: "pr <number>",
-  describe: "fetch and checkout a GitHub PR branch, then run opencode",
+  describe: "fetch and checkout a GitHub PR branch, then run openfds",
   builder: (yargs) =>
     yargs.positional("number", {
       type: "number",
@@ -26,6 +26,7 @@ export const PrCommand = cmd({
 
         const prNumber = args.number
         const localBranchName = `pr/${prNumber}`
+        const cli = (await Process.run(["openfds", "--version"], { nothrow: true })).code === 0 ? "openfds" : "opencode"
         UI.println(`Fetching and checking out PR #${prNumber}...`)
 
         // Use gh pr checkout with custom branch name
@@ -98,10 +99,10 @@ export const PrCommand = cmd({
               const sessionMatch = prInfo.body.match(/https:\/\/opncd\.ai\/s\/([a-zA-Z0-9_-]+)/)
               if (sessionMatch) {
                 const sessionUrl = sessionMatch[0]
-                UI.println(`Found opencode session: ${sessionUrl}`)
+                UI.println(`Found openfds session: ${sessionUrl}`)
                 UI.println(`Importing session...`)
 
-                const importResult = await Process.text(["opencode", "import", sessionUrl], {
+                const importResult = await Process.text([cli, "import", sessionUrl], {
                   nothrow: true,
                 })
                 if (importResult.code === 0) {
@@ -120,18 +121,18 @@ export const PrCommand = cmd({
 
         UI.println(`Successfully checked out PR #${prNumber} as branch '${localBranchName}'`)
         UI.println()
-        UI.println("Starting opencode...")
+        UI.println("Starting openfds...")
         UI.println()
 
-        const opencodeArgs = sessionId ? ["-s", sessionId] : []
-        const opencodeProcess = Process.spawn(["opencode", ...opencodeArgs], {
+        const cliArgs = sessionId ? ["-s", sessionId] : []
+        const cliProcess = Process.spawn([cli, ...cliArgs], {
           stdin: "inherit",
           stdout: "inherit",
           stderr: "inherit",
           cwd: process.cwd(),
         })
-        const code = await opencodeProcess.exited
-        if (code !== 0) throw new Error(`opencode exited with code ${code}`)
+        const code = await cliProcess.exited
+        if (code !== 0) throw new Error(`${cli} exited with code ${code}`)
       },
     })
   },

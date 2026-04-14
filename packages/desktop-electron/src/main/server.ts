@@ -1,7 +1,7 @@
 import { app } from "electron"
-import { DEFAULT_SERVER_URL_KEY, WSL_ENABLED_KEY } from "./constants"
+import { DEFAULT_SERVER_URL_KEY, LEGACY_SETTINGS_STORE, WSL_ENABLED_KEY } from "./constants"
 import { getUserShell, loadShellEnv } from "./shell-env"
-import { store } from "./store"
+import { getStore, store } from "./store"
 
 export type WslConfig = { enabled: boolean }
 
@@ -9,7 +9,9 @@ export type HealthCheck = { wait: Promise<void> }
 
 export function getDefaultServerUrl(): string | null {
   const value = store.get(DEFAULT_SERVER_URL_KEY)
-  return typeof value === "string" ? value : null
+  if (typeof value === "string") return value
+  const legacy = getStore(LEGACY_SETTINGS_STORE).get(DEFAULT_SERVER_URL_KEY)
+  return typeof legacy === "string" ? legacy : null
 }
 
 export function setDefaultServerUrl(url: string | null) {
@@ -23,7 +25,9 @@ export function setDefaultServerUrl(url: string | null) {
 
 export function getWslConfig(): WslConfig {
   const value = store.get(WSL_ENABLED_KEY)
-  return { enabled: typeof value === "boolean" ? value : false }
+  if (typeof value === "boolean") return { enabled: value }
+  const legacy = getStore(LEGACY_SETTINGS_STORE).get(WSL_ENABLED_KEY)
+  return { enabled: typeof legacy === "boolean" ? legacy : false }
 }
 
 export function setWslConfig(config: WslConfig) {
@@ -37,7 +41,7 @@ export async function spawnLocalServer(hostname: string, port: number, password:
   const listener = await Server.listen({
     port,
     hostname,
-    username: "opencode",
+    username: "openfds",
     password,
   })
 
@@ -66,7 +70,7 @@ function prepareServerEnv(password: string) {
     OPENCODE_EXPERIMENTAL_ICON_DISCOVERY: "true",
     OPENCODE_EXPERIMENTAL_FILEWATCHER: "true",
     OPENCODE_CLIENT: "desktop",
-    OPENCODE_SERVER_USERNAME: "opencode",
+    OPENCODE_SERVER_USERNAME: "openfds",
     OPENCODE_SERVER_PASSWORD: password,
     XDG_STATE_HOME: app.getPath("userData"),
   }
@@ -83,7 +87,7 @@ export async function checkHealth(url: string, password?: string | null): Promis
 
   const headers = new Headers()
   if (password) {
-    const auth = Buffer.from(`opencode:${password}`).toString("base64")
+    const auth = Buffer.from(`openfds:${password}`).toString("base64")
     headers.set("authorization", `Basic ${auth}`)
   }
 

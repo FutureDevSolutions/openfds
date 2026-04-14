@@ -8,7 +8,7 @@ import { UI } from "./ui"
 
 export function FormatError(input: unknown) {
   if (MCP.Failed.isInstance(input))
-    return `MCP server "${input.data.name}" failed. Note, opencode does not support MCP authentication yet.`
+    return `MCP server "${input.data.name}" failed. Note, openfds does not support MCP authentication yet.`
   if (input instanceof AccountTransportError || input instanceof AccountServiceError) {
     return input.message
   }
@@ -17,8 +17,8 @@ export function FormatError(input: unknown) {
     return [
       `Model not found: ${providerID}/${modelID}`,
       ...(Array.isArray(suggestions) && suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
-      `Try: \`opencode models\` to list available models`,
-      `Or check your config (opencode.json) provider/model names`,
+      `Try: \`openfds models\` to list available models`,
+      `Or check your config (openfds.json) provider/model names`,
     ].join("\n")
   }
   if (Provider.InitError.isInstance(input)) {

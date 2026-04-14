@@ -8,17 +8,20 @@ import { Flag } from "@/flag/flag"
 import { Global } from "@/global"
 
 export namespace ConfigPaths {
-  export async function projectFiles(name: string, directory: string, worktree: string) {
-    return Filesystem.findUp([`${name}.json`, `${name}.jsonc`], directory, worktree, { rootFirst: true })
+  export async function projectFiles(name: string | string[], directory: string, worktree: string) {
+    const names = Array.isArray(name) ? name : [name]
+    const targets = names.flatMap((item) => [`${item}.json`, `${item}.jsonc`])
+    return Filesystem.findUp(targets, directory, worktree, { rootFirst: true })
   }
 
   export async function directories(directory: string, worktree: string) {
     return [
+      Global.Path.legacy.config,
       Global.Path.config,
       ...(!Flag.OPENCODE_DISABLE_PROJECT_CONFIG
         ? await Array.fromAsync(
             Filesystem.up({
-              targets: [".opencode"],
+              targets: [".openfds", ".opencode"],
               start: directory,
               stop: worktree,
             }),
@@ -26,7 +29,7 @@ export namespace ConfigPaths {
         : []),
       ...(await Array.fromAsync(
         Filesystem.up({
-          targets: [".opencode"],
+          targets: [".openfds", ".opencode"],
           start: Global.Path.home,
           stop: Global.Path.home,
         }),
@@ -36,6 +39,14 @@ export namespace ConfigPaths {
   }
 
   export function fileInDirectory(dir: string, name: string) {
+    if (name === "openfds") {
+      return [
+        path.join(dir, "openfds.json"),
+        path.join(dir, "openfds.jsonc"),
+        path.join(dir, "opencode.json"),
+        path.join(dir, "opencode.jsonc"),
+      ]
+    }
     return [path.join(dir, `${name}.json`), path.join(dir, `${name}.jsonc`)]
   }
 

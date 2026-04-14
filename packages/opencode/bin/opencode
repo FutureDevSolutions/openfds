@@ -17,7 +17,7 @@ function run(target) {
   process.exit(code)
 }
 
-const envPath = process.env.OPENCODE_BIN_PATH
+const envPath = process.env.OPENFDS_BIN_PATH || process.env.OPENCODE_BIN_PATH
 if (envPath) {
   run(envPath)
 }
@@ -26,8 +26,8 @@ const scriptPath = fs.realpathSync(__filename)
 const scriptDir = path.dirname(scriptPath)
 
 //
-const cached = path.join(scriptDir, ".opencode")
-if (fs.existsSync(cached)) {
+for (const cached of [path.join(scriptDir, ".openfds"), path.join(scriptDir, ".opencode")]) {
+  if (!fs.existsSync(cached)) continue
   run(cached)
 }
 
@@ -50,8 +50,8 @@ let arch = archMap[os.arch()]
 if (!arch) {
   arch = os.arch()
 }
-const base = "opencode-" + platform + "-" + arch
-const binary = platform === "windows" ? "opencode.exe" : "opencode"
+const bases = ["openfds-" + platform + "-" + arch, "opencode-" + platform + "-" + arch]
+const binaries = platform === "windows" ? ["openfds.exe", "opencode.exe"] : ["openfds", "opencode"]
 
 function supportsAvx2() {
   if (arch !== "x64") return false
@@ -108,6 +108,7 @@ const names = (() => {
   const baseline = arch === "x64" && !avx2
 
   if (platform === "linux") {
+    const [primary, legacy] = bases
     const musl = (() => {
       try {
         if (fs.existsSync("/etc/alpine-release")) return true
@@ -128,24 +129,27 @@ const names = (() => {
 
     if (musl) {
       if (arch === "x64") {
-        if (baseline) return [`${base}-baseline-musl`, `${base}-musl`, `${base}-baseline`, base]
-        return [`${base}-musl`, `${base}-baseline-musl`, base, `${base}-baseline`]
+        if (baseline)
+          return [`${primary}-baseline-musl`, `${primary}-musl`, `${primary}-baseline`, primary, legacy]
+        return [`${primary}-musl`, `${primary}-baseline-musl`, primary, `${primary}-baseline`, legacy]
       }
-      return [`${base}-musl`, base]
+      return [`${primary}-musl`, primary, `${legacy}-musl`, legacy]
     }
 
     if (arch === "x64") {
-      if (baseline) return [`${base}-baseline`, base, `${base}-baseline-musl`, `${base}-musl`]
-      return [base, `${base}-baseline`, `${base}-musl`, `${base}-baseline-musl`]
+      if (baseline)
+        return [`${primary}-baseline`, primary, `${primary}-baseline-musl`, `${primary}-musl`, legacy]
+      return [primary, `${primary}-baseline`, `${primary}-musl`, `${primary}-baseline-musl`, legacy]
     }
-    return [base, `${base}-musl`]
+    return [primary, `${primary}-musl`, legacy, `${legacy}-musl`]
   }
 
+  const [primary, legacy] = bases
   if (arch === "x64") {
-    if (baseline) return [`${base}-baseline`, base]
-    return [base, `${base}-baseline`]
+    if (baseline) return [`${primary}-baseline`, primary, legacy]
+    return [primary, `${primary}-baseline`, legacy]
   }
-  return [base]
+  return [primary, legacy]
 })()
 
 function findBinary(startDir) {
@@ -154,8 +158,10 @@ function findBinary(startDir) {
     const modules = path.join(current, "node_modules")
     if (fs.existsSync(modules)) {
       for (const name of names) {
-        const candidate = path.join(modules, name, "bin", binary)
-        if (fs.existsSync(candidate)) return candidate
+        for (const binary of binaries) {
+          const candidate = path.join(modules, name, "bin", binary)
+          if (fs.existsSync(candidate)) return candidate
+        }
       }
     }
     const parent = path.dirname(current)
@@ -169,7 +175,7 @@ function findBinary(startDir) {
 const resolved = findBinary(scriptDir)
 if (!resolved) {
   console.error(
-    "It seems that your package manager failed to install the right version of the opencode CLI for your platform. You can try manually installing " +
+    "It seems that your package manager failed to install the right version of the openfds CLI for your platform. You can try manually installing " +
       names.map((n) => `\"${n}\"`).join(" or ") +
       " package",
   )

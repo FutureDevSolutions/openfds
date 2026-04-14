@@ -15,6 +15,10 @@ import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
+import { ProjectProfile } from "@/project/profile"
+import PROMPT_BUILD_OPENFDS from "./prompt/openfds-build.txt"
+import PROMPT_PLAN_OPENFDS from "./prompt/openfds-plan.txt"
+import PROMPT_CONTAINER_OPENFDS from "./prompt/openfds-container.txt"
 
 export namespace SystemPrompt {
   export function provider(model: Provider.Model) {
@@ -35,6 +39,8 @@ export namespace SystemPrompt {
 
   export interface Interface {
     readonly environment: (model: Provider.Model) => string[]
+    readonly project: () => Effect.Effect<string>
+    readonly agent: (agent: Agent.Info) => string | undefined
     readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   }
 
@@ -44,6 +50,7 @@ export namespace SystemPrompt {
     Service,
     Effect.gen(function* () {
       const skill = yield* Skill.Service
+      const profile = yield* ProjectProfile.Service
 
       return Service.of({
         environment(model) {
@@ -61,6 +68,25 @@ export namespace SystemPrompt {
               `</env>`,
             ].join("\n"),
           ]
+        },
+        project: Effect.fn("SystemPrompt.project")(function* () {
+          const info = yield* profile.detect()
+          const files = info.priority_files.slice(0, 24)
+          return [
+            "<project_profile>",
+            `  frameworks: ${info.frameworks.join(", ") || "unknown"}`,
+            `  preferred_lsp_servers: ${info.preferred_lsp_servers.join(", ") || "none"}`,
+            "  priority_files:",
+            ...files.map((file) => `  - ${file}`),
+            `  ignore_globs: ${info.ignore_globs.join(", ")}`,
+            "</project_profile>",
+          ].join("\n")
+        }),
+        agent(agent) {
+          if (agent.name === "build") return PROMPT_BUILD_OPENFDS
+          if (agent.name === "plan") return PROMPT_PLAN_OPENFDS
+          if (agent.name === "container") return PROMPT_CONTAINER_OPENFDS
+          return
         },
 
         skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {
@@ -80,5 +106,5 @@ export namespace SystemPrompt {
     }),
   )
 
-  export const defaultLayer = layer.pipe(Layer.provide(Skill.defaultLayer))
+  export const defaultLayer = layer.pipe(Layer.provide(Skill.defaultLayer), Layer.provide(ProjectProfile.defaultLayer))
 }

@@ -260,7 +260,7 @@ export namespace MCP {
           (t) =>
             Effect.tryPromise({
               try: () => {
-                const client = new Client({ name: "opencode", version: Installation.VERSION })
+                const client = new Client({ name: "openfds", version: Installation.VERSION })
                 return withTimeout(client.connect(t), timeout).then(() => client)
               },
               catch: (e) => (e instanceof Error ? e : new Error(String(e))),
@@ -347,7 +347,7 @@ export namespace MCP {
                   return bus
                     .publish(TuiEvent.ToastShow, {
                       title: "MCP Authentication Required",
-                      message: `Server "${key}" requires authentication. Run: opencode mcp auth ${key}`,
+                      message: `Server "${key}" requires authentication. Run: openfds mcp auth ${key}`,
                       variant: "warning",
                       duration: 8000,
                     })
@@ -389,7 +389,7 @@ export namespace MCP {
           cwd,
           env: {
             ...process.env,
-            ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
+            ...(cmd === "openfds" || cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
             ...mcp.environment,
           },
         })
@@ -752,7 +752,7 @@ export namespace MCP {
 
         return yield* Effect.tryPromise({
           try: () => {
-            const client = new Client({ name: "opencode", version: Installation.VERSION })
+            const client = new Client({ name: "openfds", version: Installation.VERSION })
             return client.connect(transport).then(() => ({ authorizationUrl: "", oauthState }))
           },
           catch: (error) => error,

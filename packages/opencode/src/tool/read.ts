@@ -12,6 +12,7 @@ import DESCRIPTION from "./read.txt"
 import { Instance } from "../project/instance"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { Instruction } from "../session/instruction"
+import { File } from "../file"
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
@@ -32,6 +33,7 @@ export const ReadTool = Tool.define(
     const instruction = yield* Instruction.Service
     const lsp = yield* LSP.Service
     const time = yield* FileTime.Service
+    const file = yield* File.Service
     const scope = yield* Scope.Scope
 
     const miss = Effect.fn("ReadTool.miss")(function* (filepath: string) {
@@ -60,19 +62,12 @@ export const ReadTool = Tool.define(
     })
 
     const list = Effect.fn("ReadTool.list")(function* (filepath: string) {
-      const items = yield* fs.readDirectoryEntries(filepath)
-      return yield* Effect.forEach(
-        items,
-        Effect.fnUntraced(function* (item) {
-          if (item.type === "directory") return item.name + "/"
-          if (item.type !== "symlink") return item.name
-
-          const target = yield* fs.stat(path.join(filepath, item.name)).pipe(Effect.catch(() => Effect.void))
-          if (target?.type === "Directory") return item.name + "/"
-          return item.name
-        }),
-        { concurrency: "unbounded" },
-      ).pipe(Effect.map((items: string[]) => items.sort((a, b) => a.localeCompare(b))))
+      const rel = path.relative(Instance.directory, filepath)
+      const items = yield* file.list(rel === "" ? undefined : rel).pipe(Effect.orElseSucceed(() => []))
+      return items
+        .filter((item) => !item.ignored)
+        .map((item) => (item.type === "directory" ? item.name + "/" : item.name))
+        .sort((a, b) => a.localeCompare(b))
     })
 
     const warm = Effect.fn("ReadTool.warm")(function* (filepath: string, sessionID: Tool.Context["sessionID"]) {

@@ -15,6 +15,7 @@ import { Instance } from "../project/instance"
 import { Log } from "../util/log"
 import { Protected } from "./protected"
 import { Ripgrep } from "./ripgrep"
+import { ProjectProfile } from "@/project/profile"
 
 export namespace File {
   export const Info = z
@@ -573,10 +574,13 @@ export namespace File {
       })
 
       const list = Effect.fn("File.list")(function* (dir?: string) {
-        const exclude = [".git", ".DS_Store"]
+        const exclude = [".DS_Store", ...ProjectProfile.DEFAULT_IGNORE_GLOBS]
         let ignored = (_: string) => false
         if (Instance.project.vcs === "git") {
           const ig = ignore()
+          ig.add(
+            ProjectProfile.DEFAULT_IGNORE_GLOBS.flatMap((item) => [item, `${item}/`, `${item}/**`]).concat([".git"]),
+          )
           const gitignore = path.join(Instance.project.worktree, ".gitignore")
           const gitignoreText = yield* appFs.readFileString(gitignore).pipe(Effect.catch(() => Effect.succeed("")))
           if (gitignoreText) ig.add(gitignoreText)
@@ -588,6 +592,52 @@ export namespace File {
 
         const resolved = dir ? path.join(Instance.directory, dir) : Instance.directory
         if (!Instance.containsPath(resolved)) throw new Error("Access denied: path escapes project directory")
+
+        if (resolved === Instance.directory) {
+          yield* ensure()
+          const top = new Map<string, { type: "file" | "directory"; absolute: string; path: string }>()
+          const { cache } = yield* InstanceState.get(state)
+
+          for (const item of cache.dirs) {
+            const name = item.split("/").filter(Boolean)[0]
+            if (!name || top.has(name)) continue
+            const absolute = path.join(resolved, name)
+            top.set(name, {
+              type: "directory",
+              absolute,
+              path: path.relative(Instance.directory, absolute),
+            })
+          }
+
+          for (const item of cache.files) {
+            const name = item.split("/").filter(Boolean)[0]
+            if (!name || top.has(name)) continue
+            const absolute = path.join(resolved, name)
+            top.set(name, {
+              type: "file",
+              absolute,
+              path: path.relative(Instance.directory, absolute),
+            })
+          }
+
+          const nodes = Array.from(top.entries()).flatMap(([name, item]) => {
+            if (exclude.includes(name)) return []
+            return [
+              {
+                name,
+                path: item.path,
+                absolute: item.absolute,
+                type: item.type,
+                ignored: ignored(item.type === "directory" ? item.path + "/" : item.path),
+              } satisfies File.Node,
+            ]
+          })
+
+          return nodes.sort((a, b) => {
+            if (a.type !== b.type) return a.type === "directory" ? -1 : 1
+            return a.name.localeCompare(b.name)
+          })
+        }
 
         const entries = yield* appFs.readDirectoryEntries(resolved).pipe(Effect.orElseSucceed(() => []))
 
