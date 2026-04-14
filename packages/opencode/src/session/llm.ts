@@ -201,14 +201,11 @@ export namespace LLM {
             input.model.providerID.toLowerCase().includes("litellm") ||
             input.model.api.id.toLowerCase().includes("litellm")
 
-          // Some OpenAI-compatible gateways reject requests where the message history
-          // contains tool calls but no tools param is present. When there are no active
-          // tools (e.g. during compaction), inject a stub tool to satisfy validation.
-          const compat =
-            (isLiteLLMProxy || input.model.api.npm === "@ai-sdk/github-copilot") &&
-            Object.keys(tools).length === 0 &&
-            hasToolCalls(input.messages)
-          if (compat) {
+          // LiteLLM/Bedrock rejects requests where the message history contains tool
+          // calls but no tools param is present. When there are no active tools (e.g.
+          // during compaction), inject a stub tool to satisfy the validation requirement.
+          // The stub description explicitly tells the model not to call it.
+          if (isLiteLLMProxy && Object.keys(tools).length === 0 && hasToolCalls(input.messages)) {
             tools["_noop"] = tool({
               description: "Do not call this tool. It exists only for API compatibility and must never be invoked.",
               inputSchema: jsonSchema({
