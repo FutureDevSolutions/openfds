@@ -561,6 +561,110 @@ describe("session.llm.stream", () => {
     })
   })
 
+  test("injects a noop tool for github copilot when history contains tool calls and no tools are active", async () => {
+    const server = state.server
+    if (!server) {
+      throw new Error("Server not initialized")
+    }
+
+    const providerID = "github-copilot"
+    const modelID = "claude-opus-4.6"
+    const request = waitRequest(
+      "/chat/completions",
+      new Response(createChatStream("Hello"), {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    )
+
+    await using tmp = await tmpdir({
+      init: async (dir) => {
+        await Bun.write(
+          path.join(dir, "opencode.json"),
+          JSON.stringify({
+            $schema: "https://opencode.ai/config.json",
+            enabled_providers: [providerID],
+            provider: {
+              [providerID]: {
+                options: {
+                  apiKey: "test-key",
+                  baseURL: `${server.url.origin}`,
+                },
+              },
+            },
+          }),
+        )
+      },
+    })
+
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await getModel(ProviderID.make(providerID), ModelID.make(modelID))
+        expect(resolved.api.npm).toBe("@ai-sdk/github-copilot")
+
+        const sessionID = SessionID.make("session-test-copilot-noop")
+        const agent = {
+          name: "compaction",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+
+        const user = {
+          id: MessageID.make("user-copilot-noop"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
+        } satisfies MessageV2.User
+
+        await drain({
+          user,
+          sessionID,
+          model: resolved,
+          agent,
+          system: ["You are a helpful assistant."],
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "list files in the root dir, then read any file" }],
+            },
+            {
+              role: "assistant",
+              content: [
+                { type: "text", text: "I'll list the root directory and then read a file from it." },
+                {
+                  type: "tool-call",
+                  toolCallId: "call-1",
+                  toolName: "read",
+                  input: { filePath: "Z:/Portal" },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              content: [
+                {
+                  type: "tool-result",
+                  toolCallId: "call-1",
+                  toolName: "read",
+                  output: { type: "text", value: "<path>Z:/Portal</path>" },
+                },
+              ],
+            },
+          ] as ModelMessage[],
+          tools: {},
+        })
+
+        const capture = await request
+        const tools = capture.body.tools as Array<{ function?: { name?: string } }> | undefined
+        expect(tools?.some((item) => item.function?.name === "_noop")).toBe(true)
+      },
+    })
+  })
+
   test("sends responses API payload for OpenAI models", async () => {
     const server = state.server
     if (!server) {
