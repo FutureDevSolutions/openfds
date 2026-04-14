@@ -3,7 +3,7 @@ import path from "path"
 import { Global } from "../global"
 import fs from "fs/promises"
 import z from "zod"
-import { Effect, Layer, Context, Schema } from "effect"
+import { Array as Arr, Effect, Layer, Context, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
@@ -20,117 +20,99 @@ import { text } from "node:stream/consumers"
 
 import { ZipReader, BlobReader, BlobWriter } from "@zip.js/zip.js"
 import { Log } from "@/util/log"
+import { zod } from "@/util/effect-zod"
 
 export namespace Ripgrep {
   const log = Log.create({ service: "ripgrep" })
-  const Stats = z.object({
-    elapsed: z.object({
-      secs: z.number(),
-      nanos: z.number(),
-      human: z.string(),
+  const stats = Schema.Struct({
+    elapsed: Schema.Struct({
+      secs: Schema.Number,
+      nanos: Schema.Number,
+      human: Schema.String,
     }),
-    searches: z.number(),
-    searches_with_match: z.number(),
-    bytes_searched: z.number(),
-    bytes_printed: z.number(),
-    matched_lines: z.number(),
-    matches: z.number(),
+    searches: Schema.Number,
+    searches_with_match: Schema.Number,
+    bytes_searched: Schema.Number,
+    bytes_printed: Schema.Number,
+    matched_lines: Schema.Number,
+    matches: Schema.Number,
   })
 
-  const Begin = z.object({
-    type: z.literal("begin"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-    }),
-  })
-
-  export const Match = z.object({
-    type: z.literal("match"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-      lines: z.object({
-        text: z.string(),
-      }),
-      line_number: z.number(),
-      absolute_offset: z.number(),
-      submatches: z.array(
-        z.object({
-          match: z.object({
-            text: z.string(),
-          }),
-          start: z.number(),
-          end: z.number(),
-        }),
-      ),
-    }),
-  })
-
-  const End = z.object({
-    type: z.literal("end"),
-    data: z.object({
-      path: z.object({
-        text: z.string(),
-      }),
-      binary_offset: z.number().nullable(),
-      stats: Stats,
-    }),
-  })
-
-  const Summary = z.object({
-    type: z.literal("summary"),
-    data: z.object({
-      elapsed_total: z.object({
-        human: z.string(),
-        nanos: z.number(),
-        secs: z.number(),
-      }),
-      stats: Stats,
-    }),
-  })
-
-  const Result = z.union([Begin, Match, End, Summary])
-
-  const Hit = Schema.Struct({
-    type: Schema.Literal("match"),
+  const begin = Schema.Struct({
+    type: Schema.Literal("begin"),
     data: Schema.Struct({
       path: Schema.Struct({
         text: Schema.String,
       }),
-      lines: Schema.Struct({
-        text: Schema.String,
-      }),
-      line_number: Schema.Number,
-      absolute_offset: Schema.Number,
-      submatches: Schema.mutable(
-        Schema.Array(
-          Schema.Struct({
-            match: Schema.Struct({
-              text: Schema.String,
-            }),
-            start: Schema.Number,
-            end: Schema.Number,
-          }),
-        ),
-      ),
     }),
   })
 
-  const Row = Schema.Union([
-    Schema.Struct({ type: Schema.Literal("begin"), data: Schema.Unknown }),
-    Hit,
-    Schema.Struct({ type: Schema.Literal("end"), data: Schema.Unknown }),
-    Schema.Struct({ type: Schema.Literal("summary"), data: Schema.Unknown }),
-  ])
+  const item = Schema.Struct({
+    path: Schema.Struct({
+      text: Schema.String,
+    }),
+    lines: Schema.Struct({
+      text: Schema.String,
+    }),
+    line_number: Schema.Number,
+    absolute_offset: Schema.Number,
+    submatches: Schema.mutable(
+      Schema.Array(
+        Schema.Struct({
+          match: Schema.Struct({
+            text: Schema.String,
+          }),
+          start: Schema.Number,
+          end: Schema.Number,
+        }),
+      ),
+    ),
+  })
 
-  const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(Row))
+  const match = Schema.Struct({
+    type: Schema.Literal("match"),
+    data: item,
+  })
 
+  const end = Schema.Struct({
+    type: Schema.Literal("end"),
+    data: Schema.Struct({
+      path: Schema.Struct({
+        text: Schema.String,
+      }),
+      binary_offset: Schema.NullOr(Schema.Number),
+      stats,
+    }),
+  })
+
+  const summary = Schema.Struct({
+    type: Schema.Literal("summary"),
+    data: Schema.Struct({
+      elapsed_total: Schema.Struct({
+        human: Schema.String,
+        nanos: Schema.Number,
+        secs: Schema.Number,
+      }),
+      stats,
+    }),
+  })
+
+  const row = Schema.Union([begin, match, end, summary])
+
+  const decode = Schema.decodeUnknownSync(Schema.fromJsonString(row))
+
+  export const Stats = zod(stats)
+  export const Begin = zod(begin)
+  export const Item = zod(item)
+  export const Match = zod(match)
+  export const End = zod(end)
+  export const Summary = zod(summary)
+  export const Result = zod(row)
+
+  export type Stats = z.infer<typeof Stats>
   export type Result = z.infer<typeof Result>
   export type Match = z.infer<typeof Match>
-  export type Item = Match["data"]
+  export type Item = z.infer<typeof Item>
   export type Begin = z.infer<typeof Begin>
   export type End = z.infer<typeof End>
   export type Summary = z.infer<typeof Summary>
@@ -432,10 +414,13 @@ export namespace Ripgrep {
                 Stream.decodeText(handle.stdout).pipe(
                   Stream.splitLines,
                   Stream.filter((line) => line.length > 0),
-                  Stream.mapEffect((line) =>
-                    decode(line).pipe(Effect.mapError((cause) => new Error("invalid ripgrep output", { cause }))),
+                  Stream.mapArrayEffect((lines) =>
+                    Effect.try({
+                      try: () => Arr.map(lines, (line) => decode(line)),
+                      catch: (cause) => new Error("invalid ripgrep output", { cause }),
+                    }),
                   ),
-                  Stream.filter((row): row is Schema.Schema.Type<typeof Hit> => row.type === "match"),
+                  Stream.filter((row): row is Schema.Schema.Type<typeof match> => row.type === "match"),
                   Stream.map((row): Item => row.data),
                   Stream.runCollect,
                   Effect.map((chunk) => [...chunk]),
