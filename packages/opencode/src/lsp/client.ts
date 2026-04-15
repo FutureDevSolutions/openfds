@@ -24,6 +24,16 @@ export namespace LSPClient {
 
   export type Diagnostic = VSCodeDiagnostic
 
+  /** Structured result from waitForDiagnostics. */
+  export interface WaitResult {
+    /** How the wait resolved. */
+    status: "published" | "timed_out" | "quiet_timeout"
+    /** Milliseconds the wait took. */
+    duration_ms: number
+    /** Diagnostic sequence number at resolution time. */
+    seq: number
+  }
+
   export const InitializeError = NamedError.create(
     "LSPInitializeError",
     z.object({
@@ -45,6 +55,8 @@ export namespace LSPClient {
     const l = log.clone().tag("serverID", input.serverID)
     l.info("starting client")
 
+    const spawnedAt = Date.now()
+
     const connection = createMessageConnection(
       new StreamMessageReader(input.server.process.stdout as any),
       new StreamMessageWriter(input.server.process.stdin as any),
@@ -52,11 +64,19 @@ export namespace LSPClient {
 
     const diagnostics = new Map<string, Diagnostic[]>()
     let lastDiagnosticsAt: number | undefined
+    let lastRequestError: string | undefined
+    let lastTouchResult: WaitResult | undefined
+    /** Monotonically increasing per-file diagnostic sequence counter for anti-stale detection. */
+    const diagnosticSeq = new Map<string, number>()
+    let globalSeq = 0
     connection.onNotification("textDocument/publishDiagnostics", (params) => {
       const filePath = Filesystem.normalizePath(fileURLToPath(params.uri))
+      globalSeq++
+      diagnosticSeq.set(filePath, globalSeq)
       l.info("textDocument/publishDiagnostics", {
         path: filePath,
         count: params.diagnostics.length,
+        seq: globalSeq,
       })
       diagnostics.set(filePath, params.diagnostics)
       lastDiagnosticsAt = Date.now()
@@ -134,6 +154,22 @@ export namespace LSPClient {
       })
     }
 
+    // Wrap connection.sendRequest to capture request errors for health telemetry.
+    const originalSendRequest = connection.sendRequest.bind(connection) as (...args: unknown[]) => Promise<unknown>
+    ;(connection as any).sendRequest = (...args: unknown[]) => {
+      const promise = originalSendRequest(...args)
+      return promise.then(
+        (result: unknown) => {
+          lastRequestError = undefined
+          return result
+        },
+        (err: unknown) => {
+          lastRequestError = err instanceof Error ? err.message : String(err)
+          throw err
+        },
+      )
+    }
+
     const files: {
       [path: string]: number
     } = {}
@@ -208,49 +244,91 @@ export namespace LSPClient {
       get diagnostics() {
         return diagnostics
       },
+      get spawnedAt() {
+        return spawnedAt
+      },
       get lastDiagnosticsAt() {
         return lastDiagnosticsAt
       },
-      async waitForDiagnostics(input: { path: string }) {
+      get lastRequestError() {
+        return lastRequestError
+      },
+      get lastTouchResult() {
+        return lastTouchResult
+      },
+      get diagnosticsSequence() {
+        return globalSeq
+      },
+      async waitForDiagnostics(input: { path: string }): Promise<WaitResult> {
         const normalizedPath = Filesystem.normalizePath(
           path.isAbsolute(input.path) ? input.path : path.resolve(Instance.directory, input.path),
         )
-        log.info("waiting for diagnostics", { path: normalizedPath })
+        const startTime = Date.now()
+        const seqAtStart = diagnosticSeq.get(normalizedPath) ?? 0
+        log.info("waiting for diagnostics", { path: normalizedPath, seqAtStart })
         let unsub: (() => void) | undefined
         let debounceTimer: ReturnType<typeof setTimeout> | undefined
         let quietTimer: ReturnType<typeof setTimeout> | undefined
+        let resolvedStatus: WaitResult["status"] = "timed_out"
+
         return await withTimeout(
-          new Promise<void>((resolve) => {
-            const done = () => {
+          new Promise<WaitResult>((resolve) => {
+            const done = (status: WaitResult["status"]) => {
+              resolvedStatus = status
               if (debounceTimer) clearTimeout(debounceTimer)
               if (quietTimer) clearTimeout(quietTimer)
               unsub?.()
-              resolve()
+              resolve({
+                status,
+                duration_ms: Date.now() - startTime,
+                seq: diagnosticSeq.get(normalizedPath) ?? seqAtStart,
+              })
             }
 
             quietTimer = setTimeout(() => {
               log.info("diagnostics quiet timeout", { path: normalizedPath })
-              done()
+              done("quiet_timeout")
             }, DIAGNOSTICS_QUIET_MS)
 
             unsub = Bus.subscribe(Event.Diagnostics, (event) => {
               if (event.properties.path === normalizedPath && event.properties.serverID === result.serverID) {
+                const currentSeq = diagnosticSeq.get(normalizedPath) ?? 0
+                // Anti-stale: only accept diagnostics published after the wait began
+                if (currentSeq <= seqAtStart) {
+                  log.info("ignoring stale diagnostic", {
+                    path: normalizedPath,
+                    currentSeq,
+                    seqAtStart,
+                  })
+                  return
+                }
                 // Debounce to allow LSP to send follow-up diagnostics (e.g., semantic after syntax)
                 if (debounceTimer) clearTimeout(debounceTimer)
                 debounceTimer = setTimeout(() => {
-                  log.info("got diagnostics", { path: normalizedPath })
-                  done()
+                  log.info("got diagnostics", { path: normalizedPath, seq: currentSeq })
+                  done("published")
                 }, DIAGNOSTICS_DEBOUNCE_MS)
               }
             })
           }),
           3000,
         )
-          .catch(() => {})
+          .catch(
+            () =>
+              ({
+                status: "timed_out",
+                duration_ms: Date.now() - startTime,
+                seq: diagnosticSeq.get(normalizedPath) ?? seqAtStart,
+              }) as WaitResult,
+          )
           .finally(() => {
             if (debounceTimer) clearTimeout(debounceTimer)
             if (quietTimer) clearTimeout(quietTimer)
             unsub?.()
+          })
+          .then((waitResult) => {
+            lastTouchResult = waitResult
+            return waitResult
           })
       },
       async shutdown() {

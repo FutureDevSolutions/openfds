@@ -75,6 +75,22 @@ export namespace LSP {
       status: z.union([z.literal("connected"), z.literal("error")]),
       last_diagnostics_at: z.number().optional(),
       error: z.string().optional(),
+      /** Epoch ms when the server process was spawned. */
+      spawned_at: z.number().optional(),
+      /** Most recent spawn error message, if any. */
+      last_spawn_error: z.string().optional(),
+      /** Most recent LSP request error message, if any. */
+      last_request_error: z.string().optional(),
+      /** Monotonically increasing diagnostic sequence counter. */
+      diagnostics_sequence: z.number().optional(),
+      /** Structured result from the most recent touchFile/waitForDiagnostics cycle. */
+      last_touch_result: z
+        .object({
+          status: z.union([z.literal("published"), z.literal("timed_out"), z.literal("quiet_timeout")]),
+          duration_ms: z.number(),
+          seq: z.number(),
+        })
+        .optional(),
     })
     .meta({
       ref: "LSPStatus",
@@ -140,6 +156,8 @@ export namespace LSP {
     clients: LSPClient.Info[]
     servers: Record<string, LSPServer.Info>
     broken: Map<string, string>
+    /** Most recent spawn error per server key, retained even if the server later recovers. */
+    lastSpawnError: Map<string, string>
     spawning: Map<string, Promise<LSPClient.Info | undefined>>
   }
 
@@ -215,6 +233,7 @@ export namespace LSP {
             clients: [],
             servers,
             broken: new Map(),
+            lastSpawnError: new Map(),
             spawning: new Map(),
           }
 
@@ -240,11 +259,17 @@ export namespace LSP {
             const handle = await server
               .spawn(root)
               .then((value) => {
-                if (!value) s.broken.set(key, "spawn returned no process")
+                if (!value) {
+                  const msg = "spawn returned no process"
+                  s.broken.set(key, msg)
+                  s.lastSpawnError.set(key, msg)
+                }
                 return value
               })
               .catch((err) => {
-                s.broken.set(key, err instanceof Error ? err.message : String(err))
+                const msg = err instanceof Error ? err.message : String(err)
+                s.broken.set(key, msg)
+                s.lastSpawnError.set(key, msg)
                 log.error(`Failed to spawn LSP server ${server.id}`, { error: err })
                 return undefined
               })
@@ -257,7 +282,9 @@ export namespace LSP {
               server: handle,
               root,
             }).catch(async (err) => {
-              s.broken.set(key, err instanceof Error ? err.message : String(err))
+              const msg = err instanceof Error ? err.message : String(err)
+              s.broken.set(key, msg)
+              s.lastSpawnError.set(key, msg)
               await Process.stop(handle.process)
               log.error(`Failed to initialize LSP client ${server.id}`, { error: err })
               return undefined
@@ -347,6 +374,11 @@ export namespace LSP {
             healthy: true,
             status: "connected",
             last_diagnostics_at: client.lastDiagnosticsAt,
+            spawned_at: client.spawnedAt,
+            last_spawn_error: s.lastSpawnError.get(key),
+            last_request_error: client.lastRequestError,
+            diagnostics_sequence: client.diagnosticsSequence,
+            last_touch_result: client.lastTouchResult,
           })
         }
         for (const [key, error] of s.broken.entries()) {
@@ -362,6 +394,7 @@ export namespace LSP {
             healthy: false,
             status: "error",
             error,
+            last_spawn_error: s.lastSpawnError.get(key),
           })
         }
         return result

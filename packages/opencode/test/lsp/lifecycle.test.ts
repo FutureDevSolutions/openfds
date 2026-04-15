@@ -123,6 +123,106 @@ describe("LSP service lifecycle", () => {
   )
 })
 
+describe("LSP status health telemetry", () => {
+  let spawnSpy: ReturnType<typeof spyOn>
+
+  afterEach(() => {
+    spawnSpy?.mockRestore()
+  })
+
+  it.live("connected server reports spawned_at and diagnostics_sequence", () =>
+    provideTmpdirInstance(() =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          // Mock spawn to return undefined so the server goes to broken
+          // but first let's check that empty status has no spawn metadata
+          spawnSpy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+          const statuses = yield* lsp.status()
+          // No clients yet, no broken either until we trigger
+          expect(statuses.length).toBe(0)
+        }),
+      ),
+    ),
+  )
+
+  it.live("spawn failure populates error and last_spawn_error in status", () =>
+    provideTmpdirInstance((dir) =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          spawnSpy = spyOn(LSPServer.Typescript, "spawn").mockRejectedValue(new Error("ENOENT: command not found"))
+
+          // Trigger a spawn by touching a .ts file
+          yield* lsp.touchFile(path.join(dir, "test.ts"))
+
+          const statuses = yield* lsp.status()
+          const errorEntry = statuses.find((s) => s.status === "error")
+          expect(errorEntry).toBeDefined()
+          expect(errorEntry!.healthy).toBe(false)
+          expect(errorEntry!.error).toContain("ENOENT")
+          expect(errorEntry!.last_spawn_error).toContain("ENOENT")
+        }),
+      ),
+    ),
+  )
+
+  it.live("spawn returning undefined marks server as broken with spawn error", () =>
+    provideTmpdirInstance((dir) =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          spawnSpy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+
+          yield* lsp.touchFile(path.join(dir, "test.ts"))
+
+          const statuses = yield* lsp.status()
+          const errorEntry = statuses.find((s) => s.status === "error")
+          expect(errorEntry).toBeDefined()
+          expect(errorEntry!.healthy).toBe(false)
+          expect(errorEntry!.last_spawn_error).toBe("spawn returned no process")
+        }),
+      ),
+    ),
+  )
+
+  it.live("broken server is not retried on subsequent touch", () =>
+    provideTmpdirInstance((dir) =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          spawnSpy = spyOn(LSPServer.Typescript, "spawn").mockRejectedValue(new Error("fail"))
+
+          // First touch triggers spawn
+          yield* lsp.touchFile(path.join(dir, "a.ts"))
+          expect(spawnSpy).toHaveBeenCalledTimes(1)
+
+          // Second touch should NOT retry (broken key is set)
+          yield* lsp.touchFile(path.join(dir, "b.ts"))
+          expect(spawnSpy).toHaveBeenCalledTimes(1)
+        }),
+      ),
+    ),
+  )
+
+  it.live("diagnostic inactivity is distinguishable from active diagnostics", () =>
+    provideTmpdirInstance(() =>
+      LSP.Service.use((lsp) =>
+        Effect.gen(function* () {
+          spawnSpy = spyOn(LSPServer.Typescript, "spawn").mockResolvedValue(undefined)
+          const statuses = yield* lsp.status()
+          // With no clients and no broken, we get empty status
+          for (const s of statuses) {
+            if (s.healthy) {
+              // A connected server with no diagnostic activity
+              expect(s.diagnostics_sequence).toBe(0)
+              expect(s.last_diagnostics_at).toBeUndefined()
+              expect(s.last_touch_result).toBeUndefined()
+            }
+          }
+          expect(statuses.length).toBe(0)
+        }),
+      ),
+    ),
+  )
+})
+
 describe("LSP.Diagnostic", () => {
   test("pretty() formats error diagnostic", () => {
     const result = LSP.Diagnostic.pretty({

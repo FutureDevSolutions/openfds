@@ -48,12 +48,29 @@ import { Agent } from "../agent/agent"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
 import { File } from "@/file"
+import { MCP } from "@/mcp"
+import { ListMcpResourcesTool, ReadMcpResourceTool } from "./mcp-resources"
+import { ToolSearchTool } from "./tool-search"
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
 
   type TaskDef = Tool.InferDef<typeof TaskTool>
   type ReadDef = Tool.InferDef<typeof ReadTool>
+
+  /**
+   * Tools that are deferred by default — not sent to the LLM until explicitly activated.
+   * Core coding tools are never deferred.
+   */
+  const DEFERRED_TOOL_IDS = new Set([
+    "lsp",
+    "webfetch",
+    "websearch",
+    "codesearch",
+    "todowrite",
+    "list_mcp_resources",
+    "read_mcp_resource",
+  ])
 
   type State = {
     custom: Tool.Def[]
@@ -65,6 +82,10 @@ export namespace ToolRegistry {
   export interface Interface {
     readonly ids: () => Effect.Effect<string[]>
     readonly all: () => Effect.Effect<Tool.Def[]>
+    /** Returns only baseline active tools (non-deferred). */
+    readonly active: () => Effect.Effect<Tool.Def[]>
+    /** Returns only deferred tools. */
+    readonly deferred: () => Effect.Effect<Tool.Def[]>
     readonly named: () => Effect.Effect<{ task: TaskDef; read: ReadDef }>
     readonly tools: (model: {
       providerID: ProviderID
@@ -98,6 +119,7 @@ export namespace ToolRegistry {
     | Ripgrep.Service
     | Format.Service
     | Truncate.Service
+    | MCP.Service
   > = Layer.effect(
     Service,
     Effect.gen(function* () {
@@ -125,6 +147,9 @@ export namespace ToolRegistry {
       const greptool = yield* GrepTool
       const patchtool = yield* ApplyPatchTool
       const skilltool = yield* SkillTool
+      const listmcpresources = yield* ListMcpResourcesTool
+      const readmcpresource = yield* ReadMcpResourceTool
+      const toolsearch = yield* ToolSearchTool
       const agent = yield* Agent.Service
 
       const state = yield* InstanceState.make<State>(
@@ -185,47 +210,67 @@ export namespace ToolRegistry {
           const questionEnabled =
             ["app", "cli", "desktop"].includes(Flag.OPENCODE_CLIENT) || Flag.OPENCODE_ENABLE_QUESTION_TOOL
 
-          const tool = yield* Effect.all({
-            invalid: Tool.init(invalid),
-            bash: Tool.init(bash),
-            read: Tool.init(read),
-            glob: Tool.init(globtool),
-            grep: Tool.init(greptool),
-            edit: Tool.init(edit),
-            write: Tool.init(writetool),
-            task: Tool.init(task),
-            fetch: Tool.init(webfetch),
-            todo: Tool.init(todo),
-            search: Tool.init(websearch),
-            code: Tool.init(codesearch),
-            skill: Tool.init(skilltool),
-            patch: Tool.init(patchtool),
-            question: Tool.init(question),
-            lsp: Tool.init(lsptool),
-            plan: Tool.init(plan),
-          })
+          const [toolBase, toolExtra] = yield* Effect.all([
+            Effect.all({
+              invalid: Tool.init(invalid),
+              bash: Tool.init(bash),
+              read: Tool.init(read),
+              glob: Tool.init(globtool),
+              grep: Tool.init(greptool),
+              edit: Tool.init(edit),
+              write: Tool.init(writetool),
+              task: Tool.init(task),
+              fetch: Tool.init(webfetch),
+              todo: Tool.init(todo),
+              search: Tool.init(websearch),
+              code: Tool.init(codesearch),
+              skill: Tool.init(skilltool),
+              patch: Tool.init(patchtool),
+              question: Tool.init(question),
+              lsp: Tool.init(lsptool),
+              plan: Tool.init(plan),
+            }),
+            Effect.all({
+              listMcpResources: Tool.init(listmcpresources),
+              readMcpResource: Tool.init(readmcpresource),
+              toolSearch: Tool.init(toolsearch),
+            }),
+          ])
+          const tool = { ...toolBase, ...toolExtra }
+
+          // Mark deferred tools
+          const allBuiltin = [
+            tool.invalid,
+            ...(questionEnabled ? [tool.question] : []),
+            tool.bash,
+            tool.read,
+            tool.glob,
+            tool.grep,
+            tool.edit,
+            tool.write,
+            tool.task,
+            tool.fetch,
+            tool.todo,
+            tool.search,
+            tool.code,
+            tool.skill,
+            tool.patch,
+            tool.lsp,
+            tool.listMcpResources,
+            tool.readMcpResource,
+            tool.toolSearch,
+            ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [tool.plan] : []),
+          ]
+
+          for (const t of allBuiltin) {
+            if (DEFERRED_TOOL_IDS.has(t.id)) {
+              ;(t as Tool.Def).deferred = true
+            }
+          }
 
           return {
             custom,
-            builtin: [
-              tool.invalid,
-              ...(questionEnabled ? [tool.question] : []),
-              tool.bash,
-              tool.read,
-              tool.glob,
-              tool.grep,
-              tool.edit,
-              tool.write,
-              tool.task,
-              tool.fetch,
-              tool.todo,
-              tool.search,
-              tool.code,
-              tool.skill,
-              tool.patch,
-              tool.lsp,
-              ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [tool.plan] : []),
-            ],
+            builtin: allBuiltin,
             task: tool.task,
             read: tool.read,
           }
@@ -235,6 +280,14 @@ export namespace ToolRegistry {
       const all: Interface["all"] = Effect.fn("ToolRegistry.all")(function* () {
         const s = yield* InstanceState.get(state)
         return [...s.builtin, ...s.custom] as Tool.Def[]
+      })
+
+      const active: Interface["active"] = Effect.fn("ToolRegistry.active")(function* () {
+        return (yield* all()).filter((t) => !t.deferred)
+      })
+
+      const deferred: Interface["deferred"] = Effect.fn("ToolRegistry.deferred")(function* () {
+        return (yield* all()).filter((t) => t.deferred === true)
       })
 
       const ids: Interface["ids"] = Effect.fn("ToolRegistry.ids")(function* () {
@@ -323,7 +376,7 @@ export namespace ToolRegistry {
         return { task: s.task, read: s.read }
       })
 
-      return Service.of({ ids, all, named, tools })
+      return Service.of({ ids, all, active, deferred, named, tools })
     }),
   )
 
@@ -347,8 +400,7 @@ export namespace ToolRegistry {
       Layer.provide(FetchHttpClient.layer),
       Layer.provide(Format.defaultLayer),
       Layer.provide(CrossSpawnSpawner.defaultLayer),
-      Layer.provide(Ripgrep.defaultLayer),
-      Layer.provide(Truncate.defaultLayer),
+      Layer.provide(Layer.merge(Ripgrep.defaultLayer, Layer.merge(Truncate.defaultLayer, MCP.defaultLayer))),
     ),
   )
 }

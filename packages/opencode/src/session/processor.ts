@@ -13,6 +13,7 @@ import { MessageV2 } from "./message-v2"
 import { isOverflow } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
+import { ToolExecutor } from "@/tool/executor"
 import { SessionRetry } from "./retry"
 import { SessionStatus } from "./status"
 import { SessionSummary } from "./summary"
@@ -72,6 +73,8 @@ export namespace SessionProcessor {
     needsCompaction: boolean
     currentText: MessageV2.TextPart | undefined
     reasoningMap: Record<string, MessageV2.ReasoningPart>
+    /** Per-step streaming tool executor — tracks state transitions and prevents duplicate terminals. */
+    executor: ToolExecutor.StepExecutor
   }
 
   type StreamEvent = Event
@@ -122,6 +125,7 @@ export namespace SessionProcessor {
           needsCompaction: false,
           currentText: undefined,
           reasoningMap: {},
+          executor: new ToolExecutor.StepExecutor(),
         }
         let aborted = false
         const slog = log.with({ sessionID: input.sessionID, messageID: input.assistantMessage.id })
@@ -178,8 +182,11 @@ export namespace SessionProcessor {
             attachments?: MessageV2.FilePart[]
           },
         ) {
+          // Guard: reject duplicate terminal writes via executor state machine
+          if (ctx.executor.isTerminal(toolCallID)) return
           const match = yield* readToolCall(toolCallID)
           if (!match || match.part.state.status !== "running") return
+          ctx.executor.transition(toolCallID, "completed")
           yield* session.updatePart({
             ...match.part,
             state: {
@@ -196,8 +203,11 @@ export namespace SessionProcessor {
         })
 
         const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
+          // Guard: reject duplicate terminal writes via executor state machine
+          if (ctx.executor.isTerminal(toolCallID)) return false
           const match = yield* readToolCall(toolCallID)
           if (!match || match.part.state.status !== "running") return false
+          ctx.executor.transition(toolCallID, "error")
           yield* session.updatePart({
             ...match.part,
             state: {
@@ -260,6 +270,12 @@ export namespace SessionProcessor {
               if (ctx.assistantMessage.summary) {
                 throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
               }
+              // Register with executor in queued state
+              ctx.executor.register({
+                callId: value.id,
+                toolId: value.toolName,
+                cancelGroup: value.toolName === "bash" ? "shell" : undefined,
+              })
               const part = yield* session.updatePart({
                 id: ctx.toolcalls[value.id]?.partID ?? PartID.ascending(),
                 messageID: ctx.assistantMessage.id,
@@ -288,6 +304,8 @@ export namespace SessionProcessor {
               if (ctx.assistantMessage.summary) {
                 throw new Error(`Tool call not allowed while generating summary: ${value.toolName}`)
               }
+              // Transition executor state: queued → executing
+              ctx.executor.transition(value.toolCallId, "executing")
               yield* updateToolCall(value.toolCallId, (match) => ({
                 ...match,
                 tool: value.toolName,
@@ -544,6 +562,8 @@ export namespace SessionProcessor {
             yield* Effect.gen(function* () {
               ctx.currentText = undefined
               ctx.reasoningMap = {}
+              // Fresh executor per process attempt — discard stale state from retries
+              ctx.executor = new ToolExecutor.StepExecutor()
               const stream = llm.stream(streamInput)
 
               yield* stream.pipe(
@@ -555,6 +575,8 @@ export namespace SessionProcessor {
               Effect.onInterrupt(() =>
                 Effect.gen(function* () {
                   aborted = true
+                  // Discard all non-terminal tool calls — prevents orphaned results
+                  ctx.executor.discardAll()
                   if (!ctx.assistantMessage.error) {
                     yield* halt(new DOMException("Aborted", "AbortError"))
                   }

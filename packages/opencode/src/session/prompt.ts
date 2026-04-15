@@ -39,6 +39,7 @@ import { Permission } from "@/permission"
 import { SessionStatus } from "./status"
 import { LLM } from "./llm"
 import { Shell } from "@/shell/shell"
+import { ToolDispatcher } from "@/tool/dispatcher"
 import { AppFileSystem } from "@/filesystem"
 import { Truncate } from "@/tool/truncate"
 import { decodeDataUrl } from "@/util/data-url"
@@ -48,6 +49,7 @@ import { EffectLogger } from "@/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
 import { attach, makeRuntime } from "@/effect/run-service"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
+import { ToolSearchState } from "@/tool/tool-search"
 import { SessionRunState } from "./run-state"
 
 // @ts-ignore
@@ -362,6 +364,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
         using _ = log.time("resolveTools")
         const tools: Record<string, AITool> = {}
 
+        // Per-resolve coordinator: batches concurrent tool calls from the AI SDK
+        const coordinator = new ToolDispatcher.StepCoordinator()
+
         const context = (args: any, options: ToolExecutionOptions): Tool.Context => ({
           sessionID: input.session.id,
           abort: options.abortSignal!,
@@ -395,45 +400,63 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               .pipe(Effect.orDie),
         })
 
-        for (const item of yield* registry.tools({
+        const allRegistryTools = yield* registry.tools({
           modelID: ModelID.make(input.model.api.id),
           providerID: input.model.providerID,
           agent: input.agent,
-        })) {
+        })
+        // Filter: include active tools + session-activated deferred tools
+        const activated = ToolSearchState.getActivated(input.session.id)
+        const deferredNames: string[] = []
+        const deferredCatalog: { id: string; description: string }[] = []
+        const includedTools = allRegistryTools.filter((item) => {
+          if (!item.deferred) return true
+          if (activated.has(item.id)) return true
+          deferredNames.push(item.id)
+          deferredCatalog.push({ id: item.id, description: item.description })
+          return false
+        })
+        // Populate catalog so tool_search can query it
+        ToolSearchState.setCatalog(input.session.id, deferredCatalog)
+
+        for (const item of includedTools) {
+          const meta = ToolDispatcher.getMeta(item)
           const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
           tools[item.id] = tool({
             id: item.id as any,
             description: item.description,
             inputSchema: jsonSchema(schema as any),
             execute(args, options) {
-              return run.promise(
-                Effect.gen(function* () {
-                  const ctx = context(args, options)
-                  yield* plugin.trigger(
-                    "tool.execute.before",
-                    { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
-                    { args },
-                  )
-                  const result = yield* item.execute(args, ctx)
-                  const output = {
-                    ...result,
-                    attachments: result.attachments?.map((attachment) => ({
-                      ...attachment,
-                      id: PartID.ascending(),
-                      sessionID: ctx.sessionID,
-                      messageID: input.processor.message.id,
-                    })),
-                  }
-                  yield* plugin.trigger(
-                    "tool.execute.after",
-                    { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
-                    output,
-                  )
-                  if (options.abortSignal?.aborted) {
-                    yield* input.processor.completeToolCall(options.toolCallId, output)
-                  }
-                  return output
-                }),
+              return coordinator.enqueue(item.id, meta, () =>
+                run.promise(
+                  Effect.gen(function* () {
+                    const ctx = context(args, options)
+                    yield* plugin.trigger(
+                      "tool.execute.before",
+                      { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+                      { args },
+                    )
+                    const result = yield* item.execute(args, ctx)
+                    const output = {
+                      ...result,
+                      attachments: result.attachments?.map((attachment) => ({
+                        ...attachment,
+                        id: PartID.ascending(),
+                        sessionID: ctx.sessionID,
+                        messageID: input.processor.message.id,
+                      })),
+                    }
+                    yield* plugin.trigger(
+                      "tool.execute.after",
+                      { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+                      output,
+                    )
+                    if (options.abortSignal?.aborted) {
+                      yield* input.processor.completeToolCall(options.toolCallId, output)
+                    }
+                    return output
+                  }),
+                ),
               )
             },
           })
@@ -517,7 +540,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           tools[key] = item
         }
 
-        return tools
+        return { tools, deferredNames }
       })
 
       const handleSubtask = Effect.fn("SessionPrompt.handleSubtask")(function* (input: {
@@ -1427,7 +1450,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
               const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
               const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
 
-              const tools = yield* resolveTools({
+              const resolved = yield* resolveTools({
                 agent,
                 session,
                 model,
@@ -1436,6 +1459,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 bypassAgentCheck,
                 messages: msgs,
               })
+              const tools = resolved.tools
 
               if (lastUser.format?.type === "json_schema") {
                 tools["StructuredOutput"] = createStructuredOutputTool({
@@ -1486,6 +1510,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
                 ...(skills ? [skills] : []),
                 ...instructions,
               ]
+              // Inject deferred tool discovery hint
+              if (resolved.deferredNames.length > 0) {
+                system.push(
+                  [
+                    "<system-reminder>",
+                    `The following deferred tools are available via the tool_search tool. They are NOT loaded yet — use tool_search with query "select:name" to activate them:`,
+                    resolved.deferredNames.join(", "),
+                    "</system-reminder>",
+                  ].join("\n"),
+                )
+              }
               const format = lastUser.format ?? { type: "text" as const }
               if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
               const result = yield* handle.process({

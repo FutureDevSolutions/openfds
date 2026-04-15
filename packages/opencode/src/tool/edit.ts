@@ -15,11 +15,11 @@ import { FileWatcher } from "../file/watcher"
 import { Bus } from "../bus"
 import { Format } from "../format"
 import { FileTime } from "../file/time"
-import { Filesystem } from "../util/filesystem"
 import { Instance } from "../project/instance"
 import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { AppFileSystem } from "../filesystem"
+import { DiagnosticService } from "../lsp/diagnostic"
 
 function normalizeLineEndings(text: string): string {
   return text.replaceAll("\r\n", "\n")
@@ -166,12 +166,28 @@ export const EditTool = Tool.define(
             },
           })
 
+          // Capture baseline diagnostics before LSP re-analysis
+          const baselineDiags = yield* lsp.diagnostics()
+          const baselineSnapshot = DiagnosticService.snapshot(baselineDiags, [filePath])
+
           let output = "Edit applied successfully."
           yield* lsp.touchFile(filePath, true)
           const diagnostics = yield* lsp.diagnostics()
           const status = yield* lsp.status()
+
+          // Compute delta against baseline
+          const afterSnapshot = DiagnosticService.snapshot(diagnostics, [filePath])
+          const diagDelta = DiagnosticService.delta(baselineSnapshot, afterSnapshot)
+          const deltaText = DiagnosticService.formatDelta(diagDelta)
+          if (deltaText) {
+            output += `\n\n${deltaText}`
+          }
+          if (DiagnosticService.hasNewErrors(diagDelta)) {
+            output += `\nNew errors introduced — fix required.`
+          }
+
           const selected = LSP.Diagnostic.select({
-            file: Filesystem.normalizePath(filePath),
+            file: AppFileSystem.normalizePath(filePath),
             diagnostics,
             status,
             spill: 2,
@@ -183,11 +199,19 @@ export const EditTool = Tool.define(
             output += `\n\nLSP errors detected in related files:\n${selected.related.map((item) => item.block).join("\n")}`
           }
 
+          const needs_fix = DiagnosticService.hasNewErrors(diagDelta)
           return {
             metadata: {
               diagnostics,
               diff,
               filediff,
+              delta: {
+                new_errors: diagDelta.new_errors,
+                new_warnings: diagDelta.new_warnings,
+                resolved_errors: diagDelta.resolved_errors,
+                resolved_warnings: diagDelta.resolved_warnings,
+              },
+              needs_fix,
             },
             title: `${path.relative(Instance.worktree, filePath)}`,
             output,

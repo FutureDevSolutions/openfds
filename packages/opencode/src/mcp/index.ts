@@ -29,6 +29,7 @@ import { EffectLogger } from "@/effect/logger"
 import { InstanceState } from "@/effect/instance-state"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import * as CrossSpawnSpawner from "@/effect/cross-spawn-spawner"
+import { McpDiscovery } from "./discovery"
 
 export namespace MCP {
   const log = Log.create({ service: "mcp" })
@@ -206,10 +207,21 @@ export namespace MCP {
 
   // --- Effect Service ---
 
+  /** Per-connector origin/quality metadata for observability. */
+  export interface ConnectorMeta {
+    origin: McpDiscovery.ConnectorOrigin
+    quality: McpDiscovery.ConnectorQuality
+    label?: string
+    description?: string
+    category?: string
+  }
+
   interface State {
     status: Record<string, Status>
     clients: Record<string, MCPClient>
     defs: Record<string, MCPToolDef[]>
+    /** Origin metadata per connector name. */
+    meta: Record<string, ConnectorMeta>
   }
 
   export interface Interface {
@@ -237,6 +249,8 @@ export namespace MCP {
     readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean>
     readonly hasStoredTokens: (mcpName: string) => Effect.Effect<boolean>
     readonly getAuthStatus: (mcpName: string) => Effect.Effect<AuthStatus>
+    /** Get origin/quality metadata for all connectors. */
+    readonly connectorMeta: () => Effect.Effect<Record<string, ConnectorMeta>>
   }
 
   export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
@@ -489,8 +503,13 @@ export namespace MCP {
             status: {},
             clients: {},
             defs: {},
+            meta: {},
           }
 
+          // Track manual config names for dedup
+          const manualNames = new Set<string>()
+
+          // Phase 1: Connect manually-configured servers
           yield* Effect.forEach(
             Object.entries(config),
             ([key, mcp]) =>
@@ -499,6 +518,9 @@ export namespace MCP {
                   log.error("Ignoring MCP config entry without type", { key })
                   return
                 }
+
+                manualNames.add(key)
+                s.meta[key] = { origin: "manual", quality: "custom" }
 
                 if (mcp.enabled === false) {
                   s.status[key] = { status: "disabled" }
@@ -517,6 +539,56 @@ export namespace MCP {
               }),
             { concurrency: "unbounded" },
           )
+
+          // Phase 2: Optional connector discovery (fail-safe)
+          const experimental = cfg.experimental as Record<string, unknown> | undefined
+          const discoveryEnabled = experimental?.mcp_discovery === true
+          if (discoveryEnabled) {
+            const discoveryResult = yield* Effect.promise(() =>
+              McpDiscovery.discover({
+                manualNames,
+                registryEnabled: true,
+                registryUrl: experimental?.mcp_registry_url as string | undefined,
+                managedConnectors: (experimental?.mcp_managed_connectors as unknown[] | undefined) ?? [],
+              }),
+            )
+
+            for (const err of discoveryResult.errors) {
+              log.warn("discovery error", { source: err.source, message: err.message })
+            }
+            for (const skip of discoveryResult.skipped) {
+              if (skip.name) log.info("discovery skipped", { name: skip.name, reason: skip.reason })
+            }
+
+            // Phase 3: Connect discovered connectors
+            if (discoveryResult.discovered.length > 0) {
+              log.info("discovery found connectors", { count: discoveryResult.discovered.length })
+              yield* Effect.forEach(
+                discoveryResult.discovered,
+                (connector) =>
+                  Effect.gen(function* () {
+                    s.meta[connector.name] = {
+                      origin: connector.origin,
+                      quality: connector.quality,
+                      label: connector.label,
+                      description: connector.description,
+                      category: connector.category,
+                    }
+
+                    const result = yield* create(connector.name, connector.config).pipe(Effect.catch(() => Effect.void))
+                    if (!result) return
+
+                    s.status[connector.name] = result.status
+                    if (result.mcpClient) {
+                      s.clients[connector.name] = result.mcpClient
+                      s.defs[connector.name] = result.defs!
+                      watch(s, connector.name, result.mcpClient, connector.config.timeout)
+                    }
+                  }),
+                { concurrency: "unbounded" },
+              )
+            }
+          }
 
           yield* Effect.addFinalizer(() =>
             Effect.gen(function* () {
@@ -858,6 +930,11 @@ export namespace MCP {
         return (expired ? "expired" : "authenticated") as AuthStatus
       })
 
+      const connectorMeta = Effect.fn("MCP.connectorMeta")(function* () {
+        const s = yield* InstanceState.get(state)
+        return { ...s.meta }
+      })
+
       return Service.of({
         status,
         clients,
@@ -876,6 +953,7 @@ export namespace MCP {
         supportsOAuth,
         hasStoredTokens,
         getAuthStatus,
+        connectorMeta,
       })
     }),
   )

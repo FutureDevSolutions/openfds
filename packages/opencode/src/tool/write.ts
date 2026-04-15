@@ -14,6 +14,7 @@ import { AppFileSystem } from "../filesystem"
 import { Instance } from "../project/instance"
 import { trimDiff } from "./edit"
 import { assertExternalDirectoryEffect } from "./external-directory"
+import { DiagnosticService } from "../lsp/diagnostic"
 
 export const WriteTool = Tool.define(
   "write",
@@ -61,10 +62,26 @@ export const WriteTool = Tool.define(
           })
           yield* filetime.read(ctx.sessionID, filepath)
 
+          // Capture baseline diagnostics before LSP re-analysis
+          const baselineDiags = yield* lsp.diagnostics()
+          const baselineSnapshot = DiagnosticService.snapshot(baselineDiags, [filepath])
+
           let output = "Wrote file successfully."
           yield* lsp.touchFile(filepath, true)
           const diagnostics = yield* lsp.diagnostics()
           const status = yield* lsp.status()
+
+          // Compute delta against baseline
+          const afterSnapshot = DiagnosticService.snapshot(diagnostics, [filepath])
+          const diagDelta = DiagnosticService.delta(baselineSnapshot, afterSnapshot)
+          const deltaText = DiagnosticService.formatDelta(diagDelta)
+          if (deltaText) {
+            output += `\n\n${deltaText}`
+          }
+          if (DiagnosticService.hasNewErrors(diagDelta)) {
+            output += `\nNew errors introduced — fix required.`
+          }
+
           const selected = LSP.Diagnostic.select({
             file: AppFileSystem.normalizePath(filepath),
             diagnostics,
@@ -78,12 +95,20 @@ export const WriteTool = Tool.define(
             output += `\n\nLSP errors detected in related files:\n${selected.related.map((item) => item.block).join("\n")}`
           }
 
+          const needs_fix = DiagnosticService.hasNewErrors(diagDelta)
           return {
             title: path.relative(Instance.worktree, filepath),
             metadata: {
               diagnostics,
               filepath,
               exists: exists,
+              delta: {
+                new_errors: diagDelta.new_errors,
+                new_warnings: diagDelta.new_warnings,
+                resolved_errors: diagDelta.resolved_errors,
+                resolved_warnings: diagDelta.resolved_warnings,
+              },
+              needs_fix,
             },
             output,
           }

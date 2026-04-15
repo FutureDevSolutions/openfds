@@ -14,6 +14,7 @@ import { AppFileSystem } from "../filesystem"
 import DESCRIPTION from "./apply_patch.txt"
 import { File } from "../file"
 import { Format } from "../format"
+import { DiagnosticService } from "../lsp/diagnostic"
 
 const PatchParams = z.object({
   patchText: z.string().describe("The full patch text that describes all changes to be made"),
@@ -236,6 +237,13 @@ export const ApplyPatchTool = Tool.define(
         yield* bus.publish(FileWatcher.Event.Updated, update)
       }
 
+      // Capture baseline diagnostics before LSP re-analysis
+      const affectedFiles = fileChanges
+        .filter((c) => c.type !== "delete")
+        .map((c) => c.movePath ?? c.filePath)
+      const baselineDiags = yield* lsp.diagnostics()
+      const baselineSnapshot = DiagnosticService.snapshot(baselineDiags, affectedFiles)
+
       // Notify LSP of file changes and collect diagnostics
       for (const change of fileChanges) {
         if (change.type === "delete") continue
@@ -244,6 +252,10 @@ export const ApplyPatchTool = Tool.define(
       }
       const diagnostics = yield* lsp.diagnostics()
       const status = yield* lsp.status()
+
+      // Compute delta against baseline
+      const afterSnapshot = DiagnosticService.snapshot(diagnostics, affectedFiles)
+      const diagDelta = DiagnosticService.delta(baselineSnapshot, afterSnapshot)
 
       // Generate output summary
       const summaryLines = fileChanges.map((change) => {
@@ -257,6 +269,14 @@ export const ApplyPatchTool = Tool.define(
         return `M ${path.relative(Instance.worktree, target).replaceAll("\\", "/")}`
       })
       let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
+
+      const deltaText = DiagnosticService.formatDelta(diagDelta)
+      if (deltaText) {
+        output += `\n\n${deltaText}`
+      }
+      if (DiagnosticService.hasNewErrors(diagDelta)) {
+        output += `\nNew errors introduced — fix required.`
+      }
 
       for (const change of fileChanges) {
         if (change.type === "delete") continue
@@ -277,12 +297,20 @@ export const ApplyPatchTool = Tool.define(
         }
       }
 
+      const needs_fix = DiagnosticService.hasNewErrors(diagDelta)
       return {
         title: output,
         metadata: {
           diff: totalDiff,
           files,
           diagnostics,
+          delta: {
+            new_errors: diagDelta.new_errors,
+            new_warnings: diagDelta.new_warnings,
+            resolved_errors: diagDelta.resolved_errors,
+            resolved_warnings: diagDelta.resolved_warnings,
+          },
+          needs_fix,
         },
         output,
       }

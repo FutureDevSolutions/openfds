@@ -11,6 +11,26 @@ export namespace Tool {
     [key: string]: any
   }
 
+  /**
+   * Execution metadata for concurrency-aware tool dispatching.
+   * Tools that do not provide metadata get safe defaults (read_only: false, concurrency_safe: false).
+   */
+  export interface ExecutionMeta {
+    /** True if the tool never mutates state (files, processes, external systems). */
+    readonly read_only: boolean
+    /** True if the tool can safely execute concurrently with other concurrency_safe tools. */
+    readonly concurrency_safe: boolean
+    /** How the tool should respond when a sibling tool in the same batch fails. */
+    readonly interrupt_behavior: "continue" | "abort"
+  }
+
+  /** Safe defaults for tools that don't declare metadata — treated as serial mutators. */
+  export const DEFAULT_EXECUTION_META: ExecutionMeta = {
+    read_only: false,
+    concurrency_safe: false,
+    interrupt_behavior: "continue",
+  } as const
+
   // TODO: remove this hack
   export type DynamicDescription = (agent: Agent.Info) => Effect.Effect<string>
 
@@ -37,6 +57,13 @@ export namespace Tool {
     id: string
     description: string
     parameters: Parameters
+    executionMeta?: ExecutionMeta
+    /**
+     * When true, this tool is not included in the baseline active tool set.
+     * It can be activated via the tool_search tool or by explicit session configuration.
+     * Default: false (tool is always active).
+     */
+    deferred?: boolean
     execute(args: z.infer<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>
     formatValidationError?(error: z.ZodError): string
   }
