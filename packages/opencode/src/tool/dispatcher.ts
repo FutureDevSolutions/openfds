@@ -64,6 +64,18 @@ export namespace ToolDispatcher {
         readonly error: unknown
         readonly recoveryHint: string
       }
+    | {
+        readonly status: "cancelled"
+        readonly index: number
+        readonly toolId: string
+        readonly reason: string
+      }
+    | {
+        readonly status: "discarded"
+        readonly index: number
+        readonly toolId: string
+        readonly reason: string
+      }
 
   /** Default bounded concurrency for parallel batches. */
   const DEFAULT_CONCURRENCY = 10
@@ -131,11 +143,25 @@ export namespace ToolDispatcher {
       return results
     }
 
-    // Parallel execution with bounded concurrency
+    // Parallel execution with bounded concurrency.
+    // Track whether an abort-behavior tool has failed, which cancels remaining queued calls.
     const executing = new Set<Promise<void>>()
     const queue = [...batch]
+    let aborted = false
+    let abortReason = ""
 
     while (queue.length > 0 || executing.size > 0) {
+      // Drain queued calls that were superseded by an abort
+      while (aborted && queue.length > 0) {
+        const cancelled = queue.shift()!
+        results.push({
+          status: "cancelled",
+          index: cancelled.index,
+          toolId: cancelled.toolId,
+          reason: abortReason,
+        })
+      }
+
       while (queue.length > 0 && executing.size < concurrency) {
         const call = queue.shift()!
         const p = (async () => {
@@ -150,6 +176,11 @@ export namespace ToolDispatcher {
               error,
               recoveryHint: formatRecoveryHint(call.toolId, error),
             })
+            // If this tool has abort interrupt behavior, cancel remaining queued calls
+            if (call.meta.interrupt_behavior === "abort") {
+              aborted = true
+              abortReason = `Sibling tool "${call.toolId}" failed: ${error instanceof Error ? error.message : String(error)}`
+            }
           }
         })()
         const tracked = p.then(() => {
@@ -196,6 +227,15 @@ export namespace ToolDispatcher {
 
     // Final sort to guarantee output order matches original call order
     allResults.sort((a, b) => a.index - b.index)
+
+    // Completeness guard: every input call must have exactly one result
+    if (allResults.length !== calls.length) {
+      throw new Error(
+        `ToolDispatcher: result count (${allResults.length}) does not match input count (${calls.length}). ` +
+          `This indicates a dropped tool-call outcome.`,
+      )
+    }
+
     return allResults
   }
 
@@ -228,11 +268,34 @@ export namespace ToolDispatcher {
    * (which it does for all tool calls within a single model step), the coordinator
    * collects them and dispatches through batched execution once the microtask drains.
    */
+  /** Error subclass for cancelled tool calls — distinguishable from runtime errors. */
+  export class CancelledError extends Error {
+    override readonly name = "CancelledError"
+    constructor(
+      message: string,
+      public readonly toolId: string,
+    ) {
+      super(message)
+    }
+  }
+
+  /** Error subclass for discarded tool calls — distinguishable from runtime errors. */
+  export class DiscardedError extends Error {
+    override readonly name = "DiscardedError"
+    constructor(
+      message: string,
+      public readonly toolId: string,
+    ) {
+      super(message)
+    }
+  }
+
   export class StepCoordinator<T = unknown> {
     private queue: QueuedEntry<T>[] = []
     private counter = 0
     private flushing = false
     private flushScheduled = false
+    private _discarded = false
     private readonly concurrency: number
     private readonly onBatchComplete?: (batchResults: CallResult<T>[], batchIndex: number) => void | Promise<void>
 
@@ -249,6 +312,9 @@ export namespace ToolDispatcher {
      * Returns a promise that resolves with the tool's result after dispatch.
      */
     enqueue(toolId: string, meta: Tool.ExecutionMeta, execute: () => Promise<T>): Promise<T> {
+      if (this._discarded) {
+        return Promise.reject(new DiscardedError("Coordinator has been discarded", toolId))
+      }
       return new Promise<T>((resolve, reject) => {
         const index = this.counter++
         this.queue.push({
@@ -258,6 +324,24 @@ export namespace ToolDispatcher {
         })
         this.scheduleFlush()
       })
+    }
+
+    /**
+     * Discard all pending (not yet dispatched) entries.
+     * Rejects their promises with a DiscardedError.
+     * Entries already in-flight during a flush are unaffected (they'll resolve/reject normally).
+     */
+    discardAll(): void {
+      this._discarded = true
+      const pending = this.queue.splice(0)
+      for (const entry of pending) {
+        entry.reject(new DiscardedError("Tool call discarded due to stream retry/fallback", entry.pending.toolId))
+      }
+    }
+
+    /** Whether this coordinator has been discarded. */
+    get discarded(): boolean {
+      return this._discarded
     }
 
     private scheduleFlush() {
@@ -296,6 +380,10 @@ export namespace ToolDispatcher {
           if (!entry) continue
           if (result.status === "ok") {
             entry.resolve(result.value)
+          } else if (result.status === "cancelled") {
+            entry.reject(new CancelledError(result.reason, result.toolId))
+          } else if (result.status === "discarded") {
+            entry.reject(new DiscardedError(result.reason, result.toolId))
           } else {
             entry.reject(result.error)
           }
@@ -308,7 +396,7 @@ export namespace ToolDispatcher {
       } finally {
         this.flushing = false
         // If more calls arrived during dispatch, flush again
-        if (this.queue.length > 0) {
+        if (this.queue.length > 0 && !this._discarded) {
           this.scheduleFlush()
         }
       }

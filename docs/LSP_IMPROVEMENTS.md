@@ -194,12 +194,29 @@ All three mutation tools (`edit.ts`, `write.ts`, `apply_patch.ts`) now follow a 
 - `apply_patch` handles multi-file patches: baseline/delta covers all affected files.
 - Normalize function aligned to `AppFileSystem.normalizePath` across all three tools.
 
-### 4.5 Add passive diagnostic queue (optional but recommended)
+### 4.5 Add passive diagnostic queue (optional but recommended) ✓ IMPLEMENTED
 
-Borrow from reference design:
-- Central registry for async `publishDiagnostics`.
-- Cross-turn dedup and volume limiting.
-- Inject only novel diagnostics into prompt context.
+Implemented as `DiagnosticService.PassiveDiagnosticRegistry` in `packages/opencode/src/lsp/diagnostic.ts`.
+
+**Design:**
+- Pure class with no side effects — caller wires `ingest()` to Bus subscription.
+- `ingest(file, diags)` — feed raw diagnostics from a `publishDiagnostics` notification.
+- `novel()` — retrieve diagnostics new since the last `drain()`.
+- `drain()` — mark current novel diagnostics as seen (end of turn).
+- `reset()` — clear all state (session change / cleanup).
+- `stats()` — observability: ingested, deduped, capDropped, seenKeys, currentNovel.
+
+**Dedup:**
+- Within-turn: identical diagnostic key (range+severity+message) on same file is counted once.
+- Cross-turn: `drain()` adds novel keys to a persistent `seen` set. Re-ingested diagnostics are suppressed.
+
+**Volume caps:**
+- `perFileCap` (default 25): max diagnostics per file per turn.
+- `totalCap` (default 100): max total diagnostics per turn across all files.
+- Caps reset on `drain()` so each turn gets a fresh budget.
+
+**Severity filtering:**
+- Only severity 1 (error) and 2 (warning) are tracked. Info and hint are ignored.
 
 ---
 
@@ -272,18 +289,32 @@ For each retry:
 
 ---
 
-## 8) Deterministic Output Standard
+## 8) Deterministic Output Standard ✓ IMPLEMENTED
 
-openfds must enforce:
+openfds enforces:
 - Stable tool result ordering for parallel batches.
 - No dropped tool call outcomes.
 - Structured failure hints returned to the model for all tool errors.
 - Final responses must include gate summary (A/B/C + LSP delta status).
 
-Suggested implementation points:
-- `packages/opencode/src/tool/dispatcher.ts`
-- `packages/opencode/src/session/prompt.ts`
-- `packages/opencode/src/tool/tool.ts`
+Implementation in `packages/opencode/src/tool/dispatcher.ts`:
+
+**CallResult type** — four terminal outcome variants:
+- `ok` — successful execution with value.
+- `error` — failed execution with error + `recoveryHint` for LLM feedback.
+- `cancelled` — call was cancelled due to sibling abort, with `reason` string.
+- `discarded` — call was discarded due to stream retry/fallback, with `reason` string.
+
+**Completeness guard** — `dispatch()` asserts `results.length === calls.length` before returning. If a tool call outcome is dropped, this throws immediately instead of returning partial results.
+
+**Abort behavior enforcement** — Tools with `interrupt_behavior: "abort"` (e.g., `question`, `plan_exit`) that fail in a parallel batch cause remaining queued calls in the same batch to be marked as `cancelled` with a structured reason. This prevents wasted execution after user-facing tools fail.
+
+**StepCoordinator lifecycle** — The per-prompt coordinator exposes:
+- `discardAll()` — rejects all pending entries with `DiscardedError`, prevents new enqueues. Used during stream retry/fallback.
+- `discarded` getter — check if coordinator has been invalidated.
+- `CancelledError` / `DiscardedError` — typed error subclasses distinguishable from runtime errors.
+
+**Ordering guarantee** — Index-based sorting in both `executeBatch` and `dispatch` ensures output order matches input order regardless of execution timing.
 
 ---
 
@@ -296,11 +327,11 @@ Phase 1 (mandatory):
 
 Phase 2 (mandatory):
 4. Add explicit gate evidence model on assistant messages/metadata.
-5. Add deterministic "no missing tool result" guard in dispatch path.
-6. Upgrade prompts (`openfds-build`, `openfds-plan`) from advisory to gate language.
+5. Add deterministic "no missing tool result" guard in dispatch path. ✓ IMPLEMENTED
+6. Upgrade prompts (`openfds-build`, `openfds-plan`) from advisory to gate language. ✓ IMPLEMENTED
 
 Phase 3 (recommended):
-7. Add passive LSP diagnostic registry with dedup + limits.
+7. Add passive LSP diagnostic registry with dedup + limits. ✓ IMPLEMENTED
 8. Add framework-specific integration recipes and container verification adapters.
 
 ---

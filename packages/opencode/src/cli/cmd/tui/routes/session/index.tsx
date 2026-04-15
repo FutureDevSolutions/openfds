@@ -7,6 +7,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -64,6 +65,8 @@ import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
 import { SubagentFooter } from "./subagent-footer.tsx"
+import { createPerformanceMonitor } from "./performance"
+import { Token } from "@/util/token"
 import { Flag } from "@/flag/flag"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
 import parsers from "../../../../../../parsers-config.ts"
@@ -246,6 +249,33 @@ export function Session() {
       if (dontShowAgain) kv.set(GO_UPSELL_DONT_SHOW, true)
       kv.set(GO_UPSELL_LAST_SEEN_AT, Date.now())
     })
+  })
+
+  // Performance monitoring
+  const perf = createPerformanceMonitor()
+  let pendingTokens = 0
+
+  event.on("message.part.delta", (evt) => {
+    if (evt.properties.sessionID !== route.sessionID) return
+    const parts = sync.data.part[evt.properties.messageID]
+    if (!parts) return
+    const part = parts.find((p) => p.id === evt.properties.partID)
+    if (!part) return
+    if (part.type !== "text" && part.type !== "reasoning") return
+    const msgs = sync.data.message[evt.properties.sessionID]
+    const message = msgs?.find((m) => m.id === evt.properties.messageID)
+    if (!message || message.role !== "assistant") return
+    pendingTokens += Token.estimate(evt.properties.delta)
+  })
+
+  createEffect(() => {
+    const interval = setInterval(() => {
+      if (pendingTokens > 0) {
+        perf.push(pendingTokens)
+        pendingTokens = 0
+      }
+    }, 1000)
+    onCleanup(() => clearInterval(interval))
   })
 
   // Allow exit when in child session (prompt is hidden)
@@ -1212,7 +1242,7 @@ export function Session() {
         <Show when={sidebarVisible()}>
           <Switch>
             <Match when={wide()}>
-              <Sidebar sessionID={route.sessionID} />
+              <Sidebar sessionID={route.sessionID} monitor={perf.monitor} />
             </Match>
             <Match when={!wide()}>
               <box
@@ -1224,7 +1254,7 @@ export function Session() {
                 alignItems="flex-end"
                 backgroundColor={RGBA.fromInts(0, 0, 0, 70)}
               >
-                <Sidebar sessionID={route.sessionID} />
+                <Sidebar sessionID={route.sessionID} monitor={perf.monitor} />
               </box>
             </Match>
           </Switch>

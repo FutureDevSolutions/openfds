@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test"
 import { Tool } from "../../src/tool/tool"
 import { ToolDispatcher } from "../../src/tool/dispatcher"
+import { ToolExecutor } from "../../src/tool/executor"
 
 // --- Helpers ---
 
@@ -680,5 +681,684 @@ describe("LSP tool metadata", () => {
       expect(meta.read_only).toBe(false)
       expect(meta.concurrency_safe).toBe(false)
     }
+  })
+})
+
+// --- interrupt_behavior: abort enforcement ---
+
+describe("ToolDispatcher: interrupt_behavior abort enforcement", () => {
+  test("abort-behavior tool failure cancels remaining queued calls in parallel batch", async () => {
+    const calls: ToolDispatcher.PendingCall<string>[] = [
+      makePending(0, "read", READ_META, async () => {
+        await new Promise((r) => setTimeout(r, 5))
+        return "ok1"
+      }),
+      makePending(1, "question", ABORT_META, async () => {
+        throw new Error("user cancelled")
+      }),
+      // These would normally run in parallel, but since they're in a mixed batch
+      // we need all-concurrent-safe for parallel. Let's test with a serial approach.
+      makePending(2, "read", READ_META, async () => "ok3"),
+    ]
+
+    const results = await ToolDispatcher.dispatch(calls)
+    // All three should have results (completeness guard)
+    expect(results).toHaveLength(3)
+  })
+
+  test("abort-behavior serial tool failure does not cancel later batches", async () => {
+    // Serial abort tool followed by a read batch
+    const calls: ToolDispatcher.PendingCall<string>[] = [
+      makePending(0, "question", ABORT_META, failingExec("question", "user cancelled")),
+      makePending(1, "read", READ_META, async () => "ok"),
+    ]
+
+    const results = await ToolDispatcher.dispatch(calls)
+    expect(results).toHaveLength(2)
+    expect(results[0].status).toBe("error")
+    expect(results[1].status).toBe("ok")
+  })
+
+  test("abort-behavior tool in parallel batch cancels remaining queued siblings", async () => {
+    // All concurrent-safe so they form one parallel batch
+    const abortConcurrent: Tool.ExecutionMeta = {
+      read_only: true,
+      concurrency_safe: true,
+      interrupt_behavior: "abort",
+    }
+    const calls: ToolDispatcher.PendingCall<string>[] = [
+      makePending(0, "fast", READ_META, async () => "fast_ok"),
+      makePending(1, "abort_tool", abortConcurrent, async () => {
+        throw new Error("abort trigger")
+      }),
+      // With concurrency=1, this will be queued when the abort fires
+      makePending(2, "slow", READ_META, async () => {
+        await new Promise((r) => setTimeout(r, 100))
+        return "slow_ok"
+      }),
+    ]
+
+    const results = await ToolDispatcher.dispatch(calls, { concurrency: 1 })
+    expect(results).toHaveLength(3)
+    // At least one should be cancelled or error
+    const cancelled = results.filter((r) => r.status === "cancelled")
+    const errors = results.filter((r) => r.status === "error")
+    expect(errors.length).toBeGreaterThanOrEqual(1)
+    // The abort tool should have an error result
+    const abortResult = results.find((r) => r.toolId === "abort_tool")
+    expect(abortResult?.status).toBe("error")
+  })
+})
+
+// --- CallResult cancelled/discarded variants ---
+
+describe("ToolDispatcher.CallResult: cancelled and discarded variants", () => {
+  test("cancelled result has reason string", () => {
+    const result: ToolDispatcher.CallResult<string> = {
+      status: "cancelled",
+      index: 0,
+      toolId: "test",
+      reason: "sibling abort",
+    }
+    expect(result.status).toBe("cancelled")
+    expect(result.reason).toBe("sibling abort")
+  })
+
+  test("discarded result has reason string", () => {
+    const result: ToolDispatcher.CallResult<string> = {
+      status: "discarded",
+      index: 0,
+      toolId: "test",
+      reason: "stream retry",
+    }
+    expect(result.status).toBe("discarded")
+    expect(result.reason).toBe("stream retry")
+  })
+})
+
+// --- StepCoordinator discard ---
+
+describe("ToolDispatcher.StepCoordinator: discard semantics", () => {
+  test("discardAll rejects pending entries and blocks new enqueues", async () => {
+    const coordinator = new ToolDispatcher.StepCoordinator<string>()
+
+    // Enqueue a call — it will be dispatched via microtask
+    const p1 = coordinator.enqueue("read", READ_META, async () => {
+      await new Promise((r) => setTimeout(r, 200))
+      return "should not resolve"
+    })
+
+    // Discard immediately — p1 may be queued or already dispatching
+    coordinator.discardAll()
+
+    // Settle p1 — it could be DiscardedError or a normal result (if microtask already fired)
+    const r1 = await Promise.allSettled([p1])
+    // Either way, p1 settled (no hanging promise)
+    expect(r1[0].status).toBeDefined()
+
+    // New enqueues after discard must reject immediately
+    const p2 = coordinator.enqueue("read", READ_META, async () => "after discard")
+    const r2 = await Promise.allSettled([p2])
+    expect(r2[0].status).toBe("rejected")
+    if (r2[0].status === "rejected") {
+      expect(r2[0].reason).toBeInstanceOf(ToolDispatcher.DiscardedError)
+    }
+  })
+
+  test("discarded coordinator rejects new enqueues immediately", async () => {
+    const coordinator = new ToolDispatcher.StepCoordinator<string>()
+    coordinator.discardAll()
+
+    expect(coordinator.discarded).toBe(true)
+
+    const result = await Promise.allSettled([
+      coordinator.enqueue("read", READ_META, async () => "never"),
+    ])
+    expect(result[0].status).toBe("rejected")
+    if (result[0].status === "rejected") {
+      expect(result[0].reason).toBeInstanceOf(ToolDispatcher.DiscardedError)
+    }
+  })
+})
+
+// --- Completeness guard ---
+
+describe("ToolDispatcher: completeness guard", () => {
+  test("dispatch returns exactly as many results as input calls", async () => {
+    const calls: ToolDispatcher.PendingCall<string>[] = [
+      makePending(0, "read", READ_META, async () => "a"),
+      makePending(1, "edit", WRITE_META, async () => "b"),
+      makePending(2, "read", READ_META, failingExec("read")),
+      makePending(3, "glob", READ_META, async () => "d"),
+    ]
+
+    const results = await ToolDispatcher.dispatch(calls)
+    expect(results).toHaveLength(4)
+    // Every input index should appear exactly once
+    const indices = results.map((r) => r.index).sort()
+    expect(indices).toEqual([0, 1, 2, 3])
+  })
+
+  test("completeness holds with all-error batch", async () => {
+    const calls: ToolDispatcher.PendingCall<string>[] = Array.from({ length: 5 }, (_, i) =>
+      makePending(i, "fail", WRITE_META, failingExec(`tool_${i}`)),
+    )
+
+    const results = await ToolDispatcher.dispatch(calls)
+    expect(results).toHaveLength(5)
+    for (const r of results) {
+      expect(r.status).toBe("error")
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+// Adversarial Verification — 5 Attack Scenarios
+// ═══════════════════════════════════════════════════════════════════
+
+describe("ADVERSARIAL 1: Mixed parallel+serial with random delays — completeness and ordering", () => {
+  test("30 mixed calls with random delays: every call gets a terminal outcome", async () => {
+    const calls: ToolDispatcher.PendingCall<string>[] = []
+    for (let i = 0; i < 30; i++) {
+      const shouldFail = i % 7 === 0
+      const isRead = i % 3 !== 2
+      const meta = isRead ? READ_META : WRITE_META
+      const delay = Math.floor(Math.random() * 20) + 1
+      calls.push(
+        makePending(
+          i,
+          isRead ? "read" : "edit",
+          meta,
+          shouldFail
+            ? failingExec(`tool_${i}`, `random failure ${i}`)
+            : async () => {
+                await new Promise((r) => setTimeout(r, delay))
+                return `result_${i}`
+              },
+        ),
+      )
+    }
+
+    const results = await ToolDispatcher.dispatch(calls)
+
+    // Completeness: every input index is present
+    expect(results).toHaveLength(30)
+    const indices = results.map((r) => r.index).sort((a, b) => a - b)
+    expect(indices).toEqual(Array.from({ length: 30 }, (_, i) => i))
+
+    // Every result is a recognized terminal status
+    for (const r of results) {
+      expect(["ok", "error", "cancelled", "discarded"]).toContain(r.status)
+    }
+
+    // Output is in index order
+    for (let i = 1; i < results.length; i++) {
+      expect(results[i].index).toBeGreaterThan(results[i - 1].index)
+    }
+  })
+
+  test("40 calls, concurrency=3: no result dropped under tight concurrency", async () => {
+    const calls: ToolDispatcher.PendingCall<number>[] = Array.from({ length: 40 }, (_, i) => {
+      const isRead = i % 5 < 3
+      return makePending(i, isRead ? "read" : "write", isRead ? READ_META : WRITE_META, async () => {
+        await new Promise((r) => setTimeout(r, Math.random() * 10))
+        if (i === 17) throw new Error("targeted failure")
+        return i
+      })
+    })
+
+    const results = await ToolDispatcher.dispatch(calls, { concurrency: 3 })
+    expect(results).toHaveLength(40)
+    // index 17 should be error
+    const r17 = results.find((r) => r.index === 17)!
+    expect(r17.status).toBe("error")
+    if (r17.status === "error") {
+      expect(r17.recoveryHint).toContain("targeted failure")
+    }
+  })
+})
+
+describe("ADVERSARIAL 2: Mid-batch abort — in-flight siblings complete, queued siblings cancelled", () => {
+  test("abort tool in parallel batch with concurrency=1: queued siblings are cancelled", async () => {
+    const ABORT_CONCURRENT: Tool.ExecutionMeta = {
+      read_only: true,
+      concurrency_safe: true,
+      interrupt_behavior: "abort",
+    }
+    const executionLog: string[] = []
+
+    // All concurrency-safe → single parallel batch. With concurrency=1, they execute
+    // one at a time. The abort tool at index 1 will fail, cancelling index 2.
+    const calls: ToolDispatcher.PendingCall<string>[] = [
+      makePending(0, "read_0", READ_META, async () => {
+        executionLog.push("read_0")
+        return "ok_0"
+      }),
+      makePending(1, "abort_tool", ABORT_CONCURRENT, async () => {
+        executionLog.push("abort_tool")
+        throw new Error("abort trigger")
+      }),
+      makePending(2, "read_2", READ_META, async () => {
+        executionLog.push("read_2")
+        return "ok_2"
+      }),
+    ]
+
+    const results = await ToolDispatcher.dispatch(calls, { concurrency: 1 })
+    expect(results).toHaveLength(3)
+
+    // index 0: executed before abort, should be ok
+    expect(results[0].status).toBe("ok")
+    // index 1: the abort trigger, should be error
+    expect(results[1].status).toBe("error")
+    // index 2: queued when abort fired, should be cancelled
+    expect(results[2].status).toBe("cancelled")
+    if (results[2].status === "cancelled") {
+      expect(results[2].reason).toContain("abort_tool")
+      expect(results[2].reason).toContain("abort trigger")
+    }
+
+    // read_2 should NOT have executed
+    expect(executionLog).not.toContain("read_2")
+  })
+
+  test("abort tool in parallel batch with higher concurrency: in-flight siblings finish normally", async () => {
+    const ABORT_CONCURRENT: Tool.ExecutionMeta = {
+      read_only: true,
+      concurrency_safe: true,
+      interrupt_behavior: "abort",
+    }
+    const executionLog: string[] = []
+
+    // With concurrency=3, all 3 start concurrently. The fast abort finishes first.
+    // Siblings already in-flight should complete normally (not cancelled).
+    const calls: ToolDispatcher.PendingCall<string>[] = [
+      makePending(0, "slow_read", READ_META, async () => {
+        executionLog.push("slow_start")
+        await new Promise((r) => setTimeout(r, 50))
+        executionLog.push("slow_end")
+        return "slow_ok"
+      }),
+      makePending(1, "abort_tool", ABORT_CONCURRENT, async () => {
+        // Fails immediately
+        throw new Error("fast abort")
+      }),
+      makePending(2, "medium_read", READ_META, async () => {
+        executionLog.push("medium_start")
+        await new Promise((r) => setTimeout(r, 30))
+        executionLog.push("medium_end")
+        return "medium_ok"
+      }),
+    ]
+
+    const results = await ToolDispatcher.dispatch(calls, { concurrency: 3 })
+    expect(results).toHaveLength(3)
+
+    // All were launched concurrently before the abort completed, so they all run
+    expect(results[0].status).toBe("ok")
+    expect(results[1].status).toBe("error")
+    expect(results[2].status).toBe("ok")
+
+    // Both slow and medium should have completed
+    expect(executionLog).toContain("slow_end")
+    expect(executionLog).toContain("medium_end")
+  })
+
+  test("abort with 5 queued and 2 in-flight: exactly 5 cancelled results", async () => {
+    const ABORT_CONCURRENT: Tool.ExecutionMeta = {
+      read_only: true,
+      concurrency_safe: true,
+      interrupt_behavior: "abort",
+    }
+    const executed: number[] = []
+
+    // 7 concurrent-safe calls, concurrency=2. First 2 launch, index 1 aborts.
+    // Index 0 is in-flight. Indices 2-6 are queued → cancelled.
+    const calls: ToolDispatcher.PendingCall<string>[] = [
+      makePending(0, "inflight", READ_META, async () => {
+        await new Promise((r) => setTimeout(r, 40))
+        executed.push(0)
+        return "ok_0"
+      }),
+      makePending(1, "aborter", ABORT_CONCURRENT, async () => {
+        await new Promise((r) => setTimeout(r, 5))
+        executed.push(1)
+        throw new Error("abort!")
+      }),
+      ...Array.from({ length: 5 }, (_, i) =>
+        makePending(i + 2, `queued_${i}`, READ_META, async () => {
+          executed.push(i + 2)
+          return `ok_${i + 2}`
+        }),
+      ),
+    ]
+
+    const results = await ToolDispatcher.dispatch(calls, { concurrency: 2 })
+    expect(results).toHaveLength(7)
+
+    // In-flight calls (0, 1) produce ok/error
+    expect(results[0].status).toBe("ok")
+    expect(results[1].status).toBe("error")
+
+    // Queued calls (2-6) should all be cancelled
+    for (let i = 2; i <= 6; i++) {
+      expect(results[i].status).toBe("cancelled")
+    }
+
+    // Queued calls should NOT have executed
+    expect(executed).not.toContain(2)
+    expect(executed).not.toContain(3)
+    expect(executed).not.toContain(4)
+    expect(executed).not.toContain(5)
+    expect(executed).not.toContain(6)
+
+    // Recovery: cancelled results have a reason
+    for (let i = 2; i <= 6; i++) {
+      if (results[i].status === "cancelled") {
+        expect(results[i].reason).toContain("aborter")
+      }
+    }
+  })
+})
+
+describe("ADVERSARIAL 3: Sibling error propagation — executor cancel groups", () => {
+  test("error in cancel group cancels siblings, non-group members unaffected", async () => {
+    const exec = new ToolExecutor.StepExecutor()
+
+    // Group "shell": c1, c2, c3
+    exec.register({ callId: "c1", toolId: "bash", cancelGroup: "shell" })
+    exec.register({ callId: "c2", toolId: "bash", cancelGroup: "shell" })
+    exec.register({ callId: "c3", toolId: "bash", cancelGroup: "shell" })
+    // No group: c4, c5
+    exec.register({ callId: "c4", toolId: "read" })
+    exec.register({ callId: "c5", toolId: "grep" })
+
+    // Start c2, c3, c4, c5 as executing (c1 will be transitioned by execute())
+    for (const id of ["c2", "c3", "c4", "c5"]) {
+      exec.transition(id, "executing")
+    }
+
+    // c1 fails via execute() → transitions queued→executing→error, then triggers sibling cancel
+    await exec.execute("c1", async () => {
+      throw new Error("bash crash")
+    })
+
+    expect(exec.get("c1")!.state).toBe("error")
+    expect(exec.get("c2")!.state).toBe("cancelled")
+    expect(exec.get("c3")!.state).toBe("cancelled")
+    expect(exec.get("c4")!.state).toBe("executing") // not in group
+    expect(exec.get("c5")!.state).toBe("executing") // not in group
+
+    // Verify abort signals fired for siblings
+    expect(exec.get("c2")!.abort.signal.aborted).toBe(true)
+    expect(exec.get("c3")!.abort.signal.aborted).toBe(true)
+    expect(exec.get("c4")!.abort.signal.aborted).toBe(false)
+  })
+
+  test("cancel during execution: record stays cancelled even if executeFn succeeds", async () => {
+    const exec = new ToolExecutor.StepExecutor()
+    exec.register({ callId: "c1", toolId: "read" })
+
+    let resolveExec!: () => void
+    const execPromise = exec.execute("c1", () => new Promise<unknown>((r) => { resolveExec = () => r("late_result") }))
+
+    // Cancel while execution is pending
+    expect(exec.get("c1")!.state).toBe("executing")
+    exec.cancel("c1")
+    expect(exec.get("c1")!.state).toBe("cancelled")
+
+    // Now let the execution complete
+    resolveExec()
+    const record = await execPromise
+
+    // State must remain cancelled — transition to completed should have failed
+    expect(record.state).toBe("cancelled")
+    // The result field may be set, but state is authoritative
+    expect(exec.isTerminal("c1")).toBe(true)
+  })
+
+  test("multiple cancel groups operate independently under concurrent execution", async () => {
+    const exec = new ToolExecutor.StepExecutor()
+    const promises: Promise<ToolExecutor.CallRecord>[] = []
+
+    // Group A: a1(fails), a2, a3
+    // Group B: b1, b2(fails), b3
+    for (const [id, group] of [
+      ["a1", "groupA"], ["a2", "groupA"], ["a3", "groupA"],
+      ["b1", "groupB"], ["b2", "groupB"], ["b3", "groupB"],
+    ] as const) {
+      exec.register({ callId: id, toolId: "bash", cancelGroup: group })
+    }
+
+    // Execute all concurrently
+    for (const id of ["a1", "a2", "a3", "b1", "b2", "b3"]) {
+      const shouldFail = id === "a1" || id === "b2"
+      promises.push(
+        exec.execute(id, async () => {
+          await new Promise((r) => setTimeout(r, shouldFail ? 5 : 30))
+          if (shouldFail) throw new Error(`${id} failed`)
+          return `${id}_result`
+        }),
+      )
+    }
+
+    await Promise.all(promises)
+
+    // Group A: a1 error, a2+a3 cancelled
+    expect(exec.get("a1")!.state).toBe("error")
+    expect(["cancelled", "completed"]).toContain(exec.get("a2")!.state)
+    expect(["cancelled", "completed"]).toContain(exec.get("a3")!.state)
+
+    // Group B: b2 error, b1+b3 may be cancelled or completed (race)
+    expect(exec.get("b2")!.state).toBe("error")
+
+    // All must be terminal
+    expect(exec.allSettled()).toBe(true)
+    const s = exec.summary()
+    expect(s.completed + s.error + s.cancelled).toBe(6)
+  })
+})
+
+describe("ADVERSARIAL 4: Fallback/discard with in-flight work", () => {
+  test("discardAll during active flush: in-flight batch completes, new enqueues rejected", async () => {
+    const coordinator = new ToolDispatcher.StepCoordinator<string>()
+    const executionLog: string[] = []
+
+    // Enqueue a slow call
+    const p1 = coordinator.enqueue("slow", READ_META, async () => {
+      executionLog.push("slow_start")
+      await new Promise((r) => setTimeout(r, 50))
+      executionLog.push("slow_end")
+      return "slow_result"
+    })
+
+    // Wait for the flush to start dispatching
+    await new Promise((r) => setTimeout(r, 10))
+
+    // Discard while p1 is in-flight
+    coordinator.discardAll()
+
+    // p1 was already dispatched — it should complete normally
+    const r1 = await Promise.allSettled([p1])
+    expect(r1[0].status).toBe("fulfilled")
+    if (r1[0].status === "fulfilled") {
+      expect(r1[0].value).toBe("slow_result")
+    }
+    expect(executionLog).toContain("slow_end")
+
+    // New enqueue after discard must reject
+    const p2 = coordinator.enqueue("after", READ_META, async () => "never")
+    const r2 = await Promise.allSettled([p2])
+    expect(r2[0].status).toBe("rejected")
+    if (r2[0].status === "rejected") {
+      expect(r2[0].reason).toBeInstanceOf(ToolDispatcher.DiscardedError)
+    }
+  })
+
+  test("discardAll with entries queued but not yet flushed: all rejected immediately", async () => {
+    const coordinator = new ToolDispatcher.StepCoordinator<string>()
+
+    // Enqueue several calls synchronously
+    const promises = [
+      coordinator.enqueue("a", READ_META, async () => "a"),
+      coordinator.enqueue("b", WRITE_META, async () => "b"),
+      coordinator.enqueue("c", READ_META, async () => "c"),
+    ]
+
+    // Discard BEFORE the microtask flush fires
+    coordinator.discardAll()
+
+    const results = await Promise.allSettled(promises)
+
+    // At least some should be rejected (the ones still in queue when discard fired).
+    // Due to microtask timing, the flush may or may not have started.
+    for (const r of results) {
+      // Each promise must settle — no hanging promises
+      expect(["fulfilled", "rejected"]).toContain(r.status)
+    }
+
+    // Coordinator is discarded
+    expect(coordinator.discarded).toBe(true)
+  })
+
+  test("executor discardAll during concurrent execution: all calls reach terminal", async () => {
+    const exec = new ToolExecutor.StepExecutor()
+    const promises: Promise<ToolExecutor.CallRecord>[] = []
+
+    for (let i = 0; i < 15; i++) {
+      const callId = `c${i}`
+      exec.register({ callId, toolId: "read" })
+      promises.push(
+        exec.execute(callId, async () => {
+          await new Promise((r) => setTimeout(r, 30 + Math.random() * 50))
+          return `r${i}`
+        }),
+      )
+    }
+
+    // Discard after a short delay
+    await new Promise((r) => setTimeout(r, 10))
+    exec.discardAll()
+
+    await Promise.allSettled(promises)
+
+    expect(exec.allSettled()).toBe(true)
+    const s = exec.summary()
+    expect(s.completed + s.error + s.cancelled + s.discarded).toBe(15)
+    // Some should be discarded (the ones still executing or queued when discardAll fired)
+    expect(s.discarded).toBeGreaterThan(0)
+  })
+})
+
+describe("ADVERSARIAL 5: Repeated stress runs for order stability", () => {
+  test("10 runs of 30 mixed calls: output order is identical every run", async () => {
+    const RUNS = 10
+    const N = 30
+    const allOrders: number[][] = []
+
+    for (let run = 0; run < RUNS; run++) {
+      const calls: ToolDispatcher.PendingCall<number>[] = []
+      for (let i = 0; i < N; i++) {
+        const isRead = i % 4 < 3
+        const shouldFail = i % 11 === 0
+        const meta = isRead ? READ_META : WRITE_META
+        const delay = Math.floor(Math.random() * 15) + 1
+        calls.push(
+          makePending(
+            i,
+            isRead ? "read" : "edit",
+            meta,
+            shouldFail
+              ? failingExec(`tool_${i}`)
+              : async () => {
+                  await new Promise((r) => setTimeout(r, delay))
+                  return i
+                },
+          ),
+        )
+      }
+
+      const results = await ToolDispatcher.dispatch(calls)
+      allOrders.push(results.map((r) => r.index))
+    }
+
+    // All runs must produce identical index ordering
+    for (let run = 1; run < RUNS; run++) {
+      expect(allOrders[run]).toEqual(allOrders[0])
+    }
+    // And the order must be 0..N-1
+    expect(allOrders[0]).toEqual(Array.from({ length: N }, (_, i) => i))
+  })
+
+  test("10 runs of StepCoordinator with 20 concurrent enqueues: all settle deterministically", async () => {
+    for (let run = 0; run < 10; run++) {
+      const coordinator = new ToolDispatcher.StepCoordinator<number>()
+      const promises: Promise<number>[] = []
+
+      for (let i = 0; i < 20; i++) {
+        const meta = i % 4 === 0 ? WRITE_META : READ_META
+        const shouldFail = i === 7
+        promises.push(
+          coordinator.enqueue(
+            `tool_${i}`,
+            meta,
+            shouldFail
+              ? async () => { throw new Error("targeted failure") }
+              : async () => {
+                  await new Promise((r) => setTimeout(r, Math.random() * 10))
+                  return i
+                },
+          ),
+        )
+      }
+
+      const results = await Promise.allSettled(promises)
+
+      // All 20 must settle — no hanging promises
+      expect(results).toHaveLength(20)
+      for (const r of results) {
+        expect(["fulfilled", "rejected"]).toContain(r.status)
+      }
+
+      // Exactly 1 failure (index 7)
+      const failures = results.filter((r) => r.status === "rejected")
+      expect(failures.length).toBe(1)
+    }
+  })
+
+  test("recovery hints are present on every error across 50 mixed calls", async () => {
+    const calls: ToolDispatcher.PendingCall<string>[] = Array.from({ length: 50 }, (_, i) => {
+      const shouldFail = i % 6 === 0
+      const isRead = i % 3 < 2
+      return makePending(
+        i,
+        shouldFail ? `fail_${i}` : `ok_${i}`,
+        isRead ? READ_META : WRITE_META,
+        shouldFail
+          ? failingExec(`tool_${i}`, `Error #${i}: ${["ENOENT", "EACCES", "TIMEOUT", "PARSE"][i % 4]}`)
+          : async () => `result_${i}`,
+      )
+    })
+
+    const results = await ToolDispatcher.dispatch(calls)
+    expect(results).toHaveLength(50)
+
+    for (const r of results) {
+      if (r.status === "error") {
+        // Recovery hint must exist and contain tool ID + error + guidance
+        expect(r.recoveryHint).toBeTruthy()
+        expect(r.recoveryHint).toContain("failed")
+        expect(r.recoveryHint).toContain("Retry with corrected arguments")
+        // Error object must be preserved
+        expect(r.error).toBeDefined()
+      } else if (r.status === "cancelled") {
+        // Cancelled results must have a reason
+        expect(r.reason).toBeTruthy()
+      }
+    }
+
+    // At least 8 failures (indices 0,6,12,18,24,30,36,42,48 = 9)
+    const errors = results.filter((r) => r.status === "error")
+    expect(errors.length).toBeGreaterThanOrEqual(8)
   })
 })

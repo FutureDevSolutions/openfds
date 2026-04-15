@@ -318,6 +318,57 @@ describe("DiagnosticService — rapid successive snapshots", () => {
   })
 })
 
+// ── Attack Scenario 6: Fix one error, introduce another ──────────
+
+describe("DiagnosticService.delta — fix-one-introduce-another", () => {
+  test("reports both resolved and new errors, needs_fix=true", () => {
+    const errorA = makeError(5, "Type 'string' is not assignable to type 'number'")
+    const errorB = makeError(12, "Property 'foo' does not exist on type 'Bar'")
+
+    const before = DiagnosticService.snapshot({ "/src/fixed.ts": [errorA] })
+    const after = DiagnosticService.snapshot({ "/src/fixed.ts": [errorB] })
+
+    const d = DiagnosticService.delta(before, after)
+    expect(d.new_errors).toBe(1)
+    expect(d.resolved_errors).toBe(1)
+    expect(d.new_warnings).toBe(0)
+    expect(d.resolved_warnings).toBe(0)
+    expect(DiagnosticService.hasNewErrors(d)).toBe(true)
+
+    const text = DiagnosticService.formatDelta(d)
+    expect(text).toContain("+1 new error")
+    expect(text).toContain("-1 resolved error")
+  })
+
+  test("resolving all errors with no new ones gives needs_fix=false", () => {
+    const errorA = makeError(5, "Type error")
+    const before = DiagnosticService.snapshot({ "/src/clean.ts": [errorA] })
+    const after = DiagnosticService.snapshot({ "/src/clean.ts": [] })
+
+    const d = DiagnosticService.delta(before, after)
+    expect(d.resolved_errors).toBe(1)
+    expect(d.new_errors).toBe(0)
+    expect(DiagnosticService.hasNewErrors(d)).toBe(false)
+  })
+})
+
+// ── Attack Scenario 7: LSP unavailable — empty diagnostics ───────
+
+describe("DiagnosticService — LSP unavailable path", () => {
+  test("empty diagnostics produce clean delta and needs_fix=false", () => {
+    const before = DiagnosticService.snapshot({}, ["/src/any.ts"])
+    const after = DiagnosticService.snapshot({}, ["/src/any.ts"])
+
+    const d = DiagnosticService.delta(before, after)
+    expect(d.new_errors).toBe(0)
+    expect(d.new_warnings).toBe(0)
+    expect(d.resolved_errors).toBe(0)
+    expect(d.resolved_warnings).toBe(0)
+    expect(DiagnosticService.hasNewErrors(d)).toBe(false)
+    expect(DiagnosticService.formatDelta(d)).toBe("")
+  })
+})
+
 // ── formatDelta and hasNewErrors ──────────────────────────────────
 
 describe("DiagnosticService.formatDelta", () => {
@@ -428,5 +479,395 @@ describe("DiagnosticService.selectForPrompt", () => {
     })
     // report() only includes severity=1, so warnings are not shown
     expect(result.current).toBe("")
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+// PassiveDiagnosticRegistry — Unit Tests
+// ═══════════════════════════════════════════════════════════════════
+
+describe("PassiveDiagnosticRegistry: basic ingest and novel flow", () => {
+  test("ingesting errors makes them available via novel()", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [makeError(1, "Type error")])
+    const novel = reg.novel()
+    expect(novel.size).toBe(1)
+    expect(novel.get("/src/a.ts")?.length).toBe(1)
+    expect(novel.get("/src/a.ts")![0].message).toBe("Type error")
+  })
+
+  test("warnings are also tracked (severity 2)", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [makeWarning(1, "Unused var")])
+    expect(reg.novelCount()).toBe(1)
+  })
+
+  test("info (severity 3) and hint (severity 4) are NOT tracked", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [
+      makeDiag({ severity: 3, message: "Info" }),
+      makeDiag({ severity: 4, message: "Hint" }),
+    ])
+    expect(reg.novelCount()).toBe(0)
+    expect(reg.novel().size).toBe(0)
+  })
+
+  test("empty diagnostics array is a no-op", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [])
+    expect(reg.novelCount()).toBe(0)
+  })
+
+  test("novelCount() reflects total novel diagnostics across files", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [makeError(1, "E1"), makeError(2, "E2")])
+    reg.ingest("/src/b.ts", [makeWarning(1, "W1")])
+    expect(reg.novelCount()).toBe(3)
+  })
+})
+
+describe("PassiveDiagnosticRegistry: within-turn dedup", () => {
+  test("identical diagnostics in same file are deduped", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    const diag = makeError(5, "Duplicate error")
+    reg.ingest("/src/a.ts", [diag, diag, diag])
+    expect(reg.novelCount()).toBe(1)
+    expect(reg.stats().deduped).toBe(2)
+  })
+
+  test("same diagnostic ingested in multiple calls is deduped", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    const diag = makeError(5, "Same error")
+    reg.ingest("/src/a.ts", [diag])
+    reg.ingest("/src/a.ts", [diag])
+    reg.ingest("/src/a.ts", [diag])
+    expect(reg.novelCount()).toBe(1)
+    expect(reg.stats().deduped).toBe(2)
+  })
+
+  test("different diagnostics on same line are NOT deduped", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [
+      makeError(5, "Error A"),
+      makeError(5, "Error B"),
+    ])
+    expect(reg.novelCount()).toBe(2)
+  })
+
+  test("same message on different lines are NOT deduped", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [
+      makeError(1, "Same message"),
+      makeError(2, "Same message"),
+    ])
+    expect(reg.novelCount()).toBe(2)
+  })
+})
+
+describe("PassiveDiagnosticRegistry: cross-turn dedup via drain()", () => {
+  test("drain() marks current novel as seen; re-ingesting after drain is deduped", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    const diag = makeError(1, "Persistent error")
+    reg.ingest("/src/a.ts", [diag])
+    expect(reg.novelCount()).toBe(1)
+
+    reg.drain()
+    expect(reg.novelCount()).toBe(0)
+    expect(reg.novel().size).toBe(0)
+
+    // Re-ingest the same diagnostic — should be deduped by cross-turn seen set
+    reg.ingest("/src/a.ts", [diag])
+    expect(reg.novelCount()).toBe(0)
+    expect(reg.stats().deduped).toBe(1)
+  })
+
+  test("new diagnostic after drain is NOT deduped", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [makeError(1, "Old error")])
+    reg.drain()
+
+    reg.ingest("/src/a.ts", [makeError(2, "New error")])
+    expect(reg.novelCount()).toBe(1)
+    expect(reg.novel().get("/src/a.ts")![0].message).toBe("New error")
+  })
+
+  test("multiple drain cycles accumulate seen set", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+
+    // Turn 1
+    reg.ingest("/src/a.ts", [makeError(1, "E1")])
+    reg.drain()
+
+    // Turn 2
+    reg.ingest("/src/a.ts", [makeError(2, "E2")])
+    reg.drain()
+
+    // Turn 3: both E1 and E2 are deduped
+    reg.ingest("/src/a.ts", [makeError(1, "E1"), makeError(2, "E2")])
+    expect(reg.novelCount()).toBe(0)
+    expect(reg.stats().seenKeys).toBe(2)
+  })
+})
+
+describe("PassiveDiagnosticRegistry: per-file and total caps", () => {
+  test("per-file cap prevents excess diagnostics", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 3, totalCap: 100 })
+    const diags = Array.from({ length: 10 }, (_, i) => makeError(i, `Error ${i}`))
+    reg.ingest("/src/a.ts", diags)
+    expect(reg.novelCount()).toBe(3)
+    expect(reg.stats().capDropped).toBe(7)
+  })
+
+  test("total cap prevents excess diagnostics across files", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 100, totalCap: 5 })
+    for (let f = 0; f < 10; f++) {
+      reg.ingest(`/src/file${f}.ts`, [makeError(0, `Error in file ${f}`)])
+    }
+    expect(reg.novelCount()).toBe(5)
+    expect(reg.stats().capDropped).toBe(5)
+  })
+
+  test("per-file cap is independent across files", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 2, totalCap: 100 })
+    reg.ingest("/src/a.ts", [makeError(0, "A0"), makeError(1, "A1"), makeError(2, "A2")])
+    reg.ingest("/src/b.ts", [makeError(0, "B0"), makeError(1, "B1"), makeError(2, "B2")])
+    // 2 per file, 4 total
+    expect(reg.novelCount()).toBe(4)
+    expect(reg.novel().get("/src/a.ts")?.length).toBe(2)
+    expect(reg.novel().get("/src/b.ts")?.length).toBe(2)
+  })
+
+  test("caps reset after drain()", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 2, totalCap: 3 })
+    reg.ingest("/src/a.ts", [makeError(0, "E0"), makeError(1, "E1"), makeError(2, "E2")])
+    expect(reg.novelCount()).toBe(2) // per-file cap hit
+    reg.drain()
+
+    // After drain, caps reset — new diagnostics can flow
+    reg.ingest("/src/a.ts", [makeError(3, "E3"), makeError(4, "E4")])
+    expect(reg.novelCount()).toBe(2)
+  })
+})
+
+describe("PassiveDiagnosticRegistry: reset()", () => {
+  test("reset clears all state including seen set", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [makeError(1, "E1")])
+    reg.drain()
+    reg.ingest("/src/a.ts", [makeError(2, "E2")])
+
+    reg.reset()
+
+    expect(reg.novelCount()).toBe(0)
+    expect(reg.novel().size).toBe(0)
+    expect(reg.stats()).toEqual({
+      ingested: 0,
+      deduped: 0,
+      capDropped: 0,
+      seenKeys: 0,
+      currentNovel: 0,
+    })
+
+    // After reset, previously-seen diagnostics are novel again
+    reg.ingest("/src/a.ts", [makeError(1, "E1")])
+    expect(reg.novelCount()).toBe(1)
+  })
+})
+
+describe("PassiveDiagnosticRegistry: stats()", () => {
+  test("stats track ingested, deduped, and capDropped accurately", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 2, totalCap: 100 })
+    const dup = makeError(1, "Dup")
+    reg.ingest("/src/a.ts", [dup, dup, makeError(2, "E2"), makeError(3, "E3"), makeError(4, "E4")])
+    // 5 ingested, 1 deduped (dup #2), 2 cap-dropped (E3, E4 over per-file cap of 2)
+    // Actually: dup(accepted), dup(deduped), E2(accepted), E3(cap), E4(cap)
+    const s = reg.stats()
+    expect(s.ingested).toBe(5)
+    expect(s.deduped).toBe(1)
+    expect(s.capDropped).toBe(2)
+    expect(s.currentNovel).toBe(2)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════
+// Adversarial Stress Tests — 5 Attack Scenarios
+// ═══════════════════════════════════════════════════════════════════
+
+describe("ADVERSARIAL 1: massive repeated diagnostics spam (1000 identical)", () => {
+  test("1000 identical diagnostics produce exactly 1 novel entry", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    const diag = makeError(1, "Spammed error")
+    const batch = Array.from({ length: 1000 }, () => diag)
+    reg.ingest("/src/spam.ts", batch)
+    expect(reg.novelCount()).toBe(1)
+    expect(reg.stats().deduped).toBe(999)
+    expect(reg.stats().ingested).toBe(1000)
+  })
+
+  test("1000 unique diagnostics are capped at perFileCap", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 25 })
+    const batch = Array.from({ length: 1000 }, (_, i) => makeError(i, `Error ${i}`))
+    reg.ingest("/src/spam.ts", batch)
+    expect(reg.novelCount()).toBe(25)
+    expect(reg.stats().capDropped).toBe(975)
+  })
+})
+
+describe("ADVERSARIAL 2: multi-file burst from single action (50 files)", () => {
+  test("50-file burst: total cap limits aggregate output", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 10, totalCap: 30 })
+    for (let f = 0; f < 50; f++) {
+      reg.ingest(`/src/file${f}.ts`, [
+        makeError(0, `Error A in file ${f}`),
+        makeError(1, `Error B in file ${f}`),
+      ])
+    }
+    // 50 files × 2 errors = 100 ingested, but total cap is 30
+    expect(reg.novelCount()).toBe(30)
+    expect(reg.stats().capDropped).toBe(70)
+  })
+
+  test("50-file burst: per-file cap limits per-file output", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 1, totalCap: 1000 })
+    for (let f = 0; f < 50; f++) {
+      reg.ingest(`/src/file${f}.ts`, [
+        makeError(0, `Error A in file ${f}`),
+        makeError(1, `Error B in file ${f}`),
+      ])
+    }
+    // 50 files × 1 per-file cap = 50, all within totalCap
+    expect(reg.novelCount()).toBe(50)
+    for (const [, diags] of reg.novel()) {
+      expect(diags.length).toBe(1)
+    }
+  })
+})
+
+describe("ADVERSARIAL 3: cross-turn duplicate suppression over 10 turns", () => {
+  test("10 turns of mixed old/new diagnostics: only truly new are surfaced", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    let totalNovel = 0
+
+    for (let turn = 0; turn < 10; turn++) {
+      // Each turn: re-send all previous errors + one new one
+      const diags: LSPClient.Diagnostic[] = []
+      for (let prev = 0; prev <= turn; prev++) {
+        diags.push(makeError(prev, `Error from turn ${prev}`))
+      }
+      reg.ingest("/src/evolving.ts", diags)
+
+      // Only the new error should be novel
+      expect(reg.novelCount()).toBe(1)
+      totalNovel++
+
+      reg.drain()
+    }
+
+    expect(totalNovel).toBe(10)
+    expect(reg.stats().seenKeys).toBe(10)
+  })
+
+  test("seen set does not grow unbounded with duplicate spam", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    const diag = makeError(1, "Persistent error")
+
+    for (let turn = 0; turn < 100; turn++) {
+      reg.ingest("/src/a.ts", [diag])
+      reg.drain()
+    }
+
+    // Only 1 unique key in seen set despite 100 turns
+    expect(reg.stats().seenKeys).toBe(1)
+  })
+})
+
+describe("ADVERSARIAL 4: mixed healthy/unhealthy severity streams", () => {
+  test("mixed severity stream: only errors and warnings tracked", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/mix.ts", [
+      makeError(1, "Error"),
+      makeWarning(2, "Warning"),
+      makeDiag({ severity: 3, message: "Info" }),
+      makeDiag({ severity: 4, message: "Hint" }),
+      makeDiag({ severity: undefined as any, message: "No severity" }), // defaults to 1
+    ])
+    // Error(1) + Warning(2) + NoSeverity(defaults to 1) = 3 actionable
+    expect(reg.novelCount()).toBe(3)
+  })
+
+  test("severity-1 errors are never dropped by dedup in favor of lower severity", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry({ perFileCap: 2 })
+    // Ingest warnings first, then errors — errors should still be accepted
+    // (they have different messages so they're different keys)
+    reg.ingest("/src/a.ts", [makeWarning(1, "W1"), makeWarning(2, "W2")])
+    // Now at per-file cap of 2
+    reg.ingest("/src/a.ts", [makeError(3, "E1")])
+    // E1 is cap-dropped because cap is already full
+    expect(reg.novelCount()).toBe(2)
+    // But the 2 that made it in should include the warnings
+    const diags = reg.novel().get("/src/a.ts")!
+    expect(diags).toHaveLength(2)
+  })
+})
+
+describe("ADVERSARIAL 5: registry cleanup/reset correctness", () => {
+  test("reset after multiple turns: no stale-state leakage", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+
+    // Build up state over several turns
+    for (let turn = 0; turn < 5; turn++) {
+      reg.ingest("/src/a.ts", [makeError(turn, `Error ${turn}`)])
+      reg.drain()
+    }
+    expect(reg.stats().seenKeys).toBe(5)
+
+    // Reset
+    reg.reset()
+
+    // All state is gone
+    expect(reg.stats().seenKeys).toBe(0)
+    expect(reg.stats().ingested).toBe(0)
+    expect(reg.novelCount()).toBe(0)
+
+    // Previously-seen diagnostics are novel again
+    reg.ingest("/src/a.ts", [makeError(0, "Error 0")])
+    expect(reg.novelCount()).toBe(1)
+  })
+
+  test("drain without ingest is a safe no-op", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.drain()
+    reg.drain()
+    reg.drain()
+    expect(reg.novelCount()).toBe(0)
+    expect(reg.stats().seenKeys).toBe(0)
+  })
+
+  test("reset then drain is a safe no-op", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+    reg.ingest("/src/a.ts", [makeError(1, "E1")])
+    reg.reset()
+    reg.drain()
+    expect(reg.novelCount()).toBe(0)
+  })
+
+  test("memory does not grow: seen set size equals unique diagnostic count", () => {
+    const reg = new DiagnosticService.PassiveDiagnosticRegistry()
+
+    // 10 turns, each with 5 unique diagnostics per file, 3 files
+    for (let turn = 0; turn < 10; turn++) {
+      for (let file = 0; file < 3; file++) {
+        const diags = Array.from({ length: 5 }, (_, i) =>
+          makeError(turn * 5 + i, `E_t${turn}_f${file}_${i}`),
+        )
+        reg.ingest(`/src/file${file}.ts`, diags)
+      }
+      reg.drain()
+    }
+
+    // 10 turns × 5 diags × 3 files = 150 unique keys
+    expect(reg.stats().seenKeys).toBe(150)
+    // No novel diagnostics after drain
+    expect(reg.novelCount()).toBe(0)
   })
 })

@@ -4,10 +4,12 @@ import { useTheme } from "../../context/theme"
 import { useTuiConfig } from "../../context/tui-config"
 import { Installation } from "@/installation"
 import { TuiPluginRuntime } from "../../plugin"
+import type { TokenMonitor } from "../../util/token-monitor"
+import { PerformancePanel } from "./performance"
 
 import { getScrollAcceleration } from "../../util/scroll"
 
-export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
+export function Sidebar(props: { sessionID: string; overlay?: boolean; monitor?: TokenMonitor }) {
   const sync = useSync()
   const { theme } = useTheme()
   const tuiConfig = useTuiConfig()
@@ -56,6 +58,15 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
             <TuiPluginRuntime.Slot name="sidebar_content" session_id={props.sessionID} />
           </box>
         </scrollbox>
+
+        <Show when={props.monitor}>
+          <box flexShrink={0} paddingTop={1}>
+            <PerformancePanel
+              monitor={props.monitor!}
+              width={38}
+            />
+          </box>
+        </Show>
 
         <box flexShrink={0} gap={1} paddingTop={1}>
           <TuiPluginRuntime.Slot name="sidebar_footer" mode="single_winner" session_id={props.sessionID}>
