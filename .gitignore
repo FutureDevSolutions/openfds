@@ -2,7 +2,6 @@
 node_modules
 .worktrees
 .sst
-.env
 .idea
 .vscode
 .codex
@@ -33,3 +32,4 @@ tsconfig.tsbuildinfo
 # Reference agent artifacts
 /claude-code
 **/CLAUDE_*.md
+config.bat
